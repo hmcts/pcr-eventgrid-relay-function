@@ -265,5 +265,13 @@ Check whether these are still open before touching the related code:
 
 ## Branch & release strategy
 
-JGitFlow, matching the estate: `main` = develop, `dev/release` = master, features `dev/feature-*`,
-releases `dev/release-*`, hotfixes `dev/hotfix-*`.
+Trunk-based on `main`, as in `service-cp-crime-results-pcr` — **not** JGitFlow. An earlier revision of
+this file said JGitFlow with `dev/feature-*` / `dev/release`; that was carried over from the Maven
+`pom.xml` (which had `jgitflow-maven-plugin`) and does not apply to the Gradle build. There is no
+`dev/release` branch.
+
+Branch as `feature/<something>` and merge via PR. Rulesets enforce it: `main` requires a PR with 1
+approval, resolved threads and 5 passing checks; `feature/**` blocks deletion and force-push. No
+bypass actors, so this applies to admins too — `git push` straight to `main` will be rejected.
+
+Releases are cut by publishing a GitHub release, which triggers `ci-released.yml`.

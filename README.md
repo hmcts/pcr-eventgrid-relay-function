@@ -316,20 +316,6 @@ only Java 21 agents, so it could never have built this repo.
 
 `dependabot.yml` tracks Gradle dependencies daily and Actions weekly, as in the PCR service.
 
-### What differs from the PCR service's CI, and why
-
-The `Artefact-Version` and `Build` jobs mirror PCR's closely. Everything downstream is different,
-because this repo ships an **Azure Functions zip**, not a Spring Boot container:
-
-| PCR service | Here |
-|---|---|
-| Publish `bootJar` to GitHub Packages / Azure Artifacts | *nothing* — this is not a library |
-| Build Docker image, push to `ghcr.io` | *nothing* — no image |
-| ADO pipeline 460: copy image to ACR | *nothing* |
-| ADO pipeline 434: Helm deploy to AKS | `Azure/functions-action` zip deploy |
-| `composeUp` / `composeDown` around tests | *nothing* — no container-backed tests |
-| DAST job: docker-compose + OWASP ZAP at `/actuator/health` | *omitted* — this app exposes no HTTP surface to scan |
-
 The build job also runs a **zip verification step** that fails CI if the packaged artefact is wrong in
 one of three ways that would otherwise only surface at runtime: a missing `eventGridTrigger` binding,
 a `function.json` `scriptFile` that does not match the versioned jar actually in the zip, or the
@@ -368,13 +354,27 @@ APP=fa-ste-ccp0121-pcrrelay
 az functionapp create -g $RG -n $APP \
   --plan as-ste-ccp0121-hearingres \
   --storage-account sasteccp0121hearingres \
-  --runtime java --runtime-version 25 --functions-version 4 --os-type Linux \
-  --app-insights ai-ste-ccp0121-hearingres
+  --runtime java --runtime-version 25.0 --functions-version 4 --os-type Linux \
+  --app-insights ai-ste-ccp0121-hearingres \
+  --tags environment=ste application=CP businessArea=crime builtFrom=Functionapp
 
 az functionapp config appsettings set -g $RG -n $APP --settings \
   PCR_SERVICE_INGESTION_ENDPOINT="https://<pcr-service-ingress-host>/pcr/internal/hearing-results" \
   FORWARD_MAX_ATTEMPTS=3 FORWARD_RETRY_DELAY_IN_SECONDS=2
 ```
+
+Three things in that first command will each fail the whole call if you get them wrong, and none of the
+error messages point at the real fix:
+
+| | Why |
+|---|---|
+| `--runtime-version 25.0`, not `25` | The CLI matches the version string exactly against `['25.0','21.0','17.0','11.0','8.0']` and rejects the bare major |
+| `--tags` with all four | The `CppTagging` management-group policy **denies** creation without `environment`, `application`, `businessArea`, `builtFrom`. Values above are copied from the sibling apps in this resource group |
+| `--os-type Linux` + Java | The shared plan `as-ste-ccp0121-hearingres` is Linux (`reserved: true`); OS cannot be mixed on one plan |
+
+Permissions needed, beyond the obvious `Microsoft.Web/sites/write`:
+`Microsoft.Storage/storageAccounts/listKeys/action` on `sasteccp0121hearingres` — the CLI reads the
+account key to build `AzureWebJobsStorage`. Read-only or Website-Contributor-only roles fail here.
 
 ### Deploy
 
@@ -446,5 +446,15 @@ CI uses OIDC federated credentials rather than `az login`; `-DARTEFACT_VERSION=`
 
 ## Branch strategy
 
-JGitFlow, matching the rest of the estate: `main` is develop, `dev/release` is master, feature
-branches are `dev/feature-*`.
+Trunk-based on `main`, matching `service-cp-crime-results-pcr` — **not** the JGitFlow model the CPP
+Maven repos use. There is no `dev/release` branch and no release-branch dance; releases are cut by
+publishing a GitHub release, which triggers `ci-released.yml`.
+
+Work on `feature/<something>` branches and merge via PR. Two rulesets enforce this:
+
+| Ruleset | Applies to | Rules |
+|---|---|---|
+| `main` | default branch | No deletion, no force-push; PR with 1 approval and resolved threads; 5 required status checks |
+| `feature-branches` | `feature/**` | No deletion, no force-push |
+
+There are no bypass actors, so the PR requirement applies to everyone including admins.

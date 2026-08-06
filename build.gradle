@@ -80,6 +80,13 @@ azurefunctions {
 
   runtime {
     os = 'linux'
+    // '25' (or 'Java 25') — NOT '25.0'. Verified against azureFunctionsDeploy: '25' and 'Java 25'
+    // both deploy; '25.0' fails with "Invalid runtime configuration".
+    //
+    // Do not "align" this with the Azure CLI, which wants the opposite: `az functionapp create
+    // --runtime-version` accepts only '25.0' and rejects '25'. The two tools validate the same
+    // concept with incompatible formats, so the README's az command and this block differ on
+    // purpose.
     javaVersion = '25'
   }
 
@@ -91,7 +98,6 @@ azurefunctions {
     WEBSITE_RUN_FROM_PACKAGE = '1'
     FUNCTIONS_EXTENSION_VERSION = '~4'
     FUNCTIONS_WORKER_RUNTIME = 'java'
-    JAVA_VERSION = '25'
   }
 
   localDebug = "transport=dt_socket,server=y,suspend=n,address=5005"
