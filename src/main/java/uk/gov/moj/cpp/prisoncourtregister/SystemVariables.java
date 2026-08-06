@@ -21,6 +21,23 @@ public final class SystemVariables {
     /** Value for {@link #PCR_SERVICE_INGRESS_HEADER_NAME}. */
     public static final String PCR_SERVICE_INGRESS_HEADER_VALUE = "PCR_SERVICE_INGRESS_HEADER_VALUE";
 
+    /**
+     * Path to a PEM bundle of extra CA certificates to trust, on top of the JVM defaults.
+     *
+     * <p>The PCR service's internal ingress presents a certificate from a private CA that the JVM does
+     * not ship. Unset it and TLS to that host fails; the Node sibling apps solve the same problem with
+     * {@code NODE_EXTRA_CA_CERTS}, which has no JVM equivalent.
+     *
+     * <p>Optional — when unset or pointing at a missing file, the default SSL context is used
+     * unchanged, so local runs and the integration tests (plain HTTP) are unaffected.
+     *
+     * <p>The bundle is deliberately **not** committed to this repository: it contains internal CA
+     * certificates and internal domain names, and this repo is public. Provision it onto the Function
+     * App instead — e.g. via {@code WEBSITE_LOAD_CERTIFICATES}, which exposes certificates under
+     * {@code /var/ssl/certs} — and point this variable at it.
+     */
+    public static final String PCR_SERVICE_CA_BUNDLE_PATH = "PCR_SERVICE_CA_BUNDLE_PATH";
+
     /** Total attempts per event, including the first. Default 3. */
     public static final String FORWARD_MAX_ATTEMPTS = "FORWARD_MAX_ATTEMPTS";
 

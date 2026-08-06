@@ -5,6 +5,7 @@ import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.FORWARD_MAX_ATT
 import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.FORWARD_RETRY_DELAY_IN_SECONDS;
 import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.HTTP_CLIENT_CONNECT_TIMEOUT_IN_SECONDS;
 import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.HTTP_CLIENT_RESPONSE_TIMEOUT_IN_SECONDS;
+import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.PCR_SERVICE_CA_BUNDLE_PATH;
 import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.PCR_SERVICE_INGESTION_ENDPOINT;
 import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.PCR_SERVICE_INGRESS_HEADER_NAME;
 import static uk.gov.moj.cpp.prisoncourtregister.SystemVariables.PCR_SERVICE_INGRESS_HEADER_VALUE;
@@ -14,6 +15,7 @@ import static uk.gov.moj.cpp.prisoncourtregister.util.EnvVarUtil.getRequiredEnv;
 import static uk.gov.moj.cpp.prisoncourtregister.util.ObjectMapperFactory.getObjectMapper;
 
 import uk.gov.moj.cpp.prisoncourtregister.model.ForwardableEvent;
+import uk.gov.moj.cpp.prisoncourtregister.util.AdditiveTrust;
 
 import java.io.IOException;
 import java.net.URI;
@@ -64,16 +66,29 @@ public class HttpEventForwarder implements EventForwarder {
 
     public HttpEventForwarder() {
         this(
-                HttpClient.newBuilder()
-                        .connectTimeout(Duration.ofSeconds(
-                                getIntEnv(HTTP_CLIENT_CONNECT_TIMEOUT_IN_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS)))
-                        .build(),
+                newHttpClient(),
                 URI.create(getRequiredEnv(PCR_SERVICE_INGESTION_ENDPOINT)),
                 getOptionalEnv(PCR_SERVICE_INGRESS_HEADER_NAME),
                 getOptionalEnv(PCR_SERVICE_INGRESS_HEADER_VALUE),
                 getIntEnv(FORWARD_MAX_ATTEMPTS, DEFAULT_MAX_ATTEMPTS),
                 Duration.ofSeconds(getIntEnv(FORWARD_RETRY_DELAY_IN_SECONDS, DEFAULT_RETRY_DELAY_SECONDS)),
                 Duration.ofSeconds(getIntEnv(HTTP_CLIENT_RESPONSE_TIMEOUT_IN_SECONDS, DEFAULT_RESPONSE_TIMEOUT_SECONDS)));
+    }
+
+    /**
+     * The client used in production: default timeouts, plus the private-CA trust the PCR service's
+     * internal ingress requires. Without the bundle the JVM rejects that certificate and every relay
+     * fails at the TLS handshake — see {@link AdditiveTrust}.
+     */
+    private static HttpClient newHttpClient() {
+        final HttpClient.Builder builder = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(
+                        getIntEnv(HTTP_CLIENT_CONNECT_TIMEOUT_IN_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS)));
+
+        AdditiveTrust.fromPemBundle(getOptionalEnv(PCR_SERVICE_CA_BUNDLE_PATH))
+                .ifPresent(builder::sslContext);
+
+        return builder.build();
     }
 
     /* default */ HttpEventForwarder(final HttpClient httpClient,
