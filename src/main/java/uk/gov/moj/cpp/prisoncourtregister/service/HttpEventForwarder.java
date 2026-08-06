@@ -129,9 +129,14 @@ public class HttpEventForwarder implements EventForwarder {
                 lastFailureWasIo = false;
 
             } catch (IOException e) {
+                // Include the exception type: ConnectException / UnknownHostException carry a null
+                // message, so logging getMessage() alone yields "I/O failure: null" — which says the
+                // call failed but not whether it was DNS, routing or a refused connection. That
+                // distinction is the whole diagnosis when the target is an internal ingress.
+                final String cause = describe(e);
                 LOGGER.warn("[Hearing ID: {}] I/O failure calling {} (attempt {}/{}): {}",
-                        hearingId, endpoint, attempt, maxAttempts, e.getMessage());
-                lastFailureDescription = "I/O failure: " + e.getMessage();
+                        hearingId, endpoint, attempt, maxAttempts, cause);
+                lastFailureDescription = "I/O failure: " + cause;
                 lastIoFailure = e;
                 lastFailureWasIo = true;
 
@@ -203,6 +208,20 @@ public class HttpEventForwarder implements EventForwarder {
      */
     private static boolean isRetryable(final int status) {
         return status >= 500 || status == 408 || status == 429;
+    }
+
+    /**
+     * {@code type: message}, or just the type when the message is null.
+     *
+     * <p>{@link java.net.ConnectException} and {@link java.net.UnknownHostException} routinely carry a
+     * null message, and "I/O failure: null" does not tell you whether the target was unresolvable,
+     * unroutable or refusing connections.
+     */
+    private static String describe(final Exception e) {
+        final String message = e.getMessage();
+        return message == null || message.isBlank()
+                ? e.getClass().getSimpleName()
+                : e.getClass().getSimpleName() + ": " + message;
     }
 
     private static String truncate(final String body) {

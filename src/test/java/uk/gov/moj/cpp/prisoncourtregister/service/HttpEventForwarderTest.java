@@ -176,7 +176,7 @@ class HttpEventForwarderTest {
     }
 
     @Test
-    @DisplayName("wraps a connection failure as ForwardingException")
+    @DisplayName("wraps a connection failure as ForwardingException, naming the I/O cause")
     void wrapsConnectionFailure() {
         final URI unreachable = URI.create("http://127.0.0.1:1/internal/hearing-results");
 
@@ -184,7 +184,12 @@ class HttpEventForwarderTest {
                 Optional.empty(), Optional.empty(), 2, Duration.ZERO, Duration.ofSeconds(2))
                 .forward(event))
                 .isInstanceOf(ForwardingException.class)
-                .hasMessageContaining("after 2 attempt(s)");
+                .hasMessageContaining("after 2 attempt(s)")
+                // ConnectException.getMessage() is null, so the exception TYPE has to appear or the
+                // failure reads as "I/O failure: null" — which cannot distinguish an unroutable host
+                // from an unresolvable one. That ambiguity cost real debugging time against a
+                // deployed app with no VNet integration.
+                .hasMessageContaining("ConnectException");
     }
 
     @Test
