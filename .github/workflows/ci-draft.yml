@@ -1,0 +1,26 @@
+name: Build and Deploy (Non-Release)
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  ci-draft:
+    uses: ./.github/workflows/ci-build-deploy.yml
+    permissions:
+      id-token: write
+      contents: read
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    with:
+      environment: dev
+      # Build and verify the zip on PRs, but only deploy on a push to main.
+      trigger_deploy: ${{ github.event_name == 'push' }}

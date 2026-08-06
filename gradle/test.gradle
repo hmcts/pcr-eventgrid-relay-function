@@ -1,0 +1,42 @@
+// Shared configuration for every Test task (unit `test` and `integrationTest`).
+tasks.withType(Test).configureEach {
+  useJUnitPlatform {
+  }
+  failFast = true
+  testLogging {
+    events "passed", "skipped", "failed"
+    exceptionFormat = 'full'
+    showStandardStreams = true
+  }
+  reports {
+    junitXml.required.set(true)
+    html.required.set(true)
+  }
+}
+
+// Unit tests only — no Docker required. Integration tests live in the same source set (matching
+// service-cp-crime-results-pcr's placement) but are executed by the separate `integrationTest` task
+// in gradle/docker-test.gradle, so this stays fast and runnable anywhere.
+tasks.named('test') {
+  exclude '**/integration/**'
+}
+
+// Covers both test tasks: the executionData fileTree picks up every .exec under build/jacoco,
+// so coverage is the union of unit and integration runs rather than whichever ran last.
+tasks.named('jacocoTestReport') {
+  dependsOn tasks.named('test')
+  mustRunAfter tasks.withType(Test)
+  executionData fileTree(
+    dir: layout.buildDirectory.dir("jacoco").get().asFile,
+    include: ["*.exec"]
+  )
+  reports {
+    xml.required.set(true)
+    csv.required.set(false)
+    html.required.set(true)
+  }
+}
+
+tasks.named('check') {
+  dependsOn tasks.named('jacocoTestReport')
+}

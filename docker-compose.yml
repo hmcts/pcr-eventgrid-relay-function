@@ -1,0 +1,35 @@
+services:
+  # The app under test, running in the real Azure Functions Java 25 runtime. The app root is the
+  # staging directory produced by `./gradlew azureFunctionsPackage`, so this runs exactly what would
+  # be deployed. composeUp depends on that task — see gradle/docker-test.gradle.
+  functions:
+    image: mcr.microsoft.com/azure-functions/java:4-java25
+    environment:
+      AzureWebJobsScriptRoot: /home/site/wwwroot
+      FUNCTIONS_WORKER_RUNTIME: java
+      # File-based secret storage, seeded with known keys, so tests can call
+      # /runtime/webhooks/eventgrid with a predictable ?code=. Without the eventgrid_extension
+      # system key the host answers 401, and AZURE_FUNCTIONS_ENVIRONMENT=Development does not
+      # waive it.
+      AzureWebJobsSecretStorageType: files
+      AzureFunctionsJobHost__Logging__Console__IsEnabled: "true"
+      # Points at the WireMock service below, over the compose network.
+      PCR_SERVICE_INGESTION_ENDPOINT: http://wiremock:8080/internal/hearing-results
+      # Keep the failure-path tests quick.
+      FORWARD_MAX_ATTEMPTS: "2"
+      FORWARD_RETRY_DELAY_IN_SECONDS: "0"
+    volumes:
+      - ${FUNCTION_APP_STAGING_DIR:-./build/azure-functions/fa-ste-ccp0121-pcrrelay}:/home/site/wwwroot:ro
+      - ./build/functions-host-secrets:/azure-functions-host/Secrets
+    ports:
+      - "7071:80"
+    depends_on:
+      - wiremock
+
+  # Stands in for service-cp-crime-results-pcr. Driven over its admin API from the tests, so stubs
+  # and request assertions work the same as an in-JVM WireMock.
+  wiremock:
+    image: wiremock/wiremock:3.13.2
+    command: [ "--local-response-templating", "--verbose" ]
+    ports:
+      - "8089:8080"

@@ -1,0 +1,21 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true or <storage-connection-string>",
+    "FUNCTIONS_WORKER_RUNTIME": "java",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+
+    "//": "PCR service ingestion endpoint. Path is ingress prefix /pcr + the service's POST /internal/hearing-results. Required. Replace <pcr-service-ingress-host> with the per-environment internal ingress host from the platform team - deliberately not recorded in this public repo.",
+    "PCR_SERVICE_INGESTION_ENDPOINT": "https://<pcr-service-ingress-host>/pcr/internal/hearing-results",
+
+    "//  ": "Optional ingress header. The endpoint is security:[] (network-isolated), so leave both unset unless an ingress in front of it requires one.",
+    "PCR_SERVICE_INGRESS_HEADER_NAME": "",
+    "PCR_SERVICE_INGRESS_HEADER_VALUE": "",
+
+    "//   ": "Outbound HTTP tuning. All optional; defaults shown.",
+    "FORWARD_MAX_ATTEMPTS": "3",
+    "FORWARD_RETRY_DELAY_IN_SECONDS": "2",
+    "HTTP_CLIENT_CONNECT_TIMEOUT_IN_SECONDS": "10",
+    "HTTP_CLIENT_RESPONSE_TIMEOUT_IN_SECONDS": "30"
+  }
+}

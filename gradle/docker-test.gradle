@@ -1,0 +1,90 @@
+// Integration tests: placed exactly as service-cp-crime-results-pcr places them — in the normal
+// `src/test` source set, package `...prisoncourtregister.integration`, named `*IntegrationTest` — but
+// EXECUTED by their own task so that `./gradlew test` stays fast and Docker-free.
+//
+//   ./gradlew test              unit only, no Docker
+//   ./gradlew integrationTest   brings the compose stack up, runs them, tears it down
+//   ./gradlew build             both (so it needs Docker)
+//
+// dockerCompose.isRequiredBy wires composeUp before / composeDown after, including on failure, so
+// there is no manual composeUp/composeDown sequencing to get wrong in CI.
+
+dockerCompose {
+    useComposeFiles = ['docker-compose.yml']
+    startedServices = ['functions', 'wiremock']
+
+    buildBeforeUp = false
+    waitForTcpPorts = true
+    upAdditionalArgs = ['--wait', '--wait-timeout', '180']
+
+    captureContainersOutput = true
+    removeOrphans = true
+    stopContainers = true
+    removeContainers = true
+
+    useDockerComposeV2 = true
+    dockerExecutable = 'docker'
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs the packaged app in a real Azure Functions container and drives the Event Grid webhook.'
+    group = 'verification'
+
+    // Same source set as the unit tests; only the selection differs.
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+
+    include '**/integration/**'
+
+    shouldRunAfter tasks.named('test')
+}
+
+// Starts the stack before integrationTest and tears it down afterwards, failure included.
+dockerCompose.isRequiredBy(tasks.named('integrationTest'))
+
+// `check` (and therefore `build`) runs both suites.
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest')
+}
+
+// The functions service mounts the packaged app and needs seeded host keys, so both must exist
+// before the stack comes up.
+tasks.named('composeUp').configure {
+    dependsOn tasks.named('azureFunctionsPackage'), tasks.named('prepareFunctionsHostSecrets')
+}
+
+// The Functions host protects /runtime/webhooks/eventgrid with the eventgrid_extension system key.
+// Generated into build/ rather than committed, so nothing key-shaped is ever checked in (and the
+// secrets scanner has nothing to flag).
+tasks.register('prepareFunctionsHostSecrets') {
+    description = 'Seeds the Functions host file-based secret store with known test keys.'
+    group = 'verification'
+
+    def secretsDir = layout.buildDirectory.dir('functions-host-secrets')
+    outputs.dir(secretsDir)
+
+    doLast {
+        def dir = secretsDir.get().asFile
+        dir.mkdirs()
+        // Values are fixed test constants, mirrored in FunctionsHostClient.
+        new File(dir, 'host.json').text = """\
+{
+  "masterKey":    { "name": "master", "value": "integrationTestMasterKey", "encrypted": false },
+  "functionKeys": [ { "name": "default", "value": "integrationTestFunctionKey", "encrypted": false } ],
+  "systemKeys":   [ { "name": "eventgrid_extension", "value": "integrationTestSystemKey", "encrypted": false } ],
+  "hostName": null,
+  "instanceId": "00000000000000000000000000000000",
+  "source": "runtime",
+  "decryptionKeyId": ""
+}
+"""
+        // The container runs as a non-root user and must be able to read (and rewrite) these.
+        dir.setReadable(true, false)
+        dir.setExecutable(true, false)
+        dir.setWritable(true, false)
+        new File(dir, 'host.json').with {
+            setReadable(true, false)
+            setWritable(true, false)
+        }
+    }
+}

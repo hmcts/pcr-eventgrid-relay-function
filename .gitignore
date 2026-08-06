@@ -1,0 +1,53 @@
+# Gradle
+.gradle/
+build/
+/gradlew.bat
+
+# Java
+*.class
+
+# Package Files — note the negation: gradle-wrapper.jar MUST stay tracked or ./gradlew
+# cannot bootstrap on a fresh clone. Order matters, the negation follows the exclusion.
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+*.rar
+
+# Azure Functions local config (never commit — holds endpoints and keys)
+local.settings.json
+**/local.settings.json
+bin/
+obj/
+
+# Mac
+.DS_Store
+**/.DS_Store
+.fseventsd/
+.Spotlight-V100/
+.Trashes/
+._.Trashes
+Thumbs.db
+
+# IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+/out
+
+# Eclipse
+.classpath
+.project
+.settings/
+.factorypath
+.checkstyle
+
+.vscode/
+
+# Misc
+*~
+*.log
+*.orig
+*.sonar
+**/*.env

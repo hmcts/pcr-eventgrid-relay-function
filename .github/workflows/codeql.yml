@@ -1,0 +1,72 @@
+name: CodeQL
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+
+  schedule:
+    - cron: '36 5 * * 4'
+
+# Adapted from service-cp-crime-results-pcr's codeql.yml. Its DAST job is deliberately NOT carried
+# over: that job starts the app via docker-compose and points OWASP ZAP at an HTTP health endpoint.
+# This app has no HTTP surface at all — it is an Event Grid-triggered worker whose only outbound call
+# is to an internal endpoint — so there is nothing for a baseline web scan to attack.
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
+        language: [ 'java' ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 25
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: current
+
+      - name: Gradle Build
+        run: ./gradlew build cyclonedxBom -x test
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{matrix.language}}"
+
+      # Note the path differs from the PCR service's. That project is Spring Boot, so the SBOM is
+      # embedded at build/resources/main/META-INF/sbom/application.cdx.json by the bootJar. This is a
+      # plain java project, where the cyclonedx plugin writes to build/reports/cyclonedx/.
+      - name: Log generated SBOM hash
+        run: sha256sum build/reports/cyclonedx/bom.json || true
+
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: build/reports/cyclonedx/bom.json
+          if-no-files-found: warn

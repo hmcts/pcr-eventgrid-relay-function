@@ -1,0 +1,13 @@
+def azureADOArtifactRepository = 'https://pkgs.dev.azure.com/hmcts/Artifacts/_packaging/hmcts-lib/maven/v1'
+
+repositories {
+  mavenLocal()
+  mavenCentral()
+  maven {
+    url = azureADOArtifactRepository
+  }
+}
+
+// Deliberately no `publishing` block. This project's deliverable is an Azure Functions
+// deployment zip (`./gradlew azureFunctionsPackage`), not a library published to a Maven
+// repository — unlike service-cp-crime-results-pcr, which publishes its bootJar.

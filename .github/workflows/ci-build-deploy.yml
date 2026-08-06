@@ -1,0 +1,234 @@
+name: CI Build and Deploy
+
+# Reusable workflow, called by ci-draft.yml (PR / push to main) and ci-released.yml (release).
+#
+# Adapted from service-cp-crime-results-pcr's ci-build-publish.yml. The Artefact-Version and Build
+# jobs mirror it closely; everything downstream is deliberately different, because this repo ships an
+# **Azure Functions deployment zip**, not a Spring Boot container:
+#
+#   PCR service                                    this repo
+#   -----------                                    ---------
+#   publish bootJar to Maven repos          ->     (nothing — not a library)
+#   build Docker image, push to ghcr        ->     (nothing — no image)
+#   ADO pipeline 460: copy image to ACR     ->     (nothing)
+#   ADO pipeline 434: Helm deploy to AKS    ->     Azure/functions-action zip deploy
+#
+on:
+  workflow_call:
+    secrets:
+      AZURE_CLIENT_ID:
+        required: false
+        description: "Entra app (federated credential) for OIDC login. Deploy is skipped when unset."
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_SUBSCRIPTION_ID:
+        required: false
+      GITLEAKS_LICENSE:
+        required: false
+    inputs:
+      environment:
+        required: true
+        type: string
+        default: dev
+      is_release:
+        required: false
+        type: boolean
+        default: false
+      trigger_deploy:
+        required: true
+        type: boolean
+      function_app_name:
+        required: false
+        type: string
+        default: fa-ste-ccp0121-pcrrelay
+      function_resource_group:
+        required: false
+        type: string
+        default: RG-STE-CCP0121-HEARINGRES
+
+jobs:
+  Artefact-Version:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    outputs:
+      artefact_version: ${{ inputs.is_release && steps.artefact.outputs.release_version || steps.artefact.outputs.draft_version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate Artefact Version
+        id: artefact
+        uses: hmcts/artefact-version-action@v1
+        with:
+          release: ${{ inputs.is_release }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  Build:
+    needs: [Artefact-Version]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    outputs:
+      zip_name: ${{ steps.package.outputs.zip_name }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: current
+
+      # A single `build` covers both suites. Unlike service-cp-crime-results-pcr there is no manual
+      # composeUp/composeDown sequencing here: `check` depends on the `integrationTest` task, and
+      # dockerCompose.isRequiredBy brings the stack up before it and tears it down afterwards —
+      # including when tests fail. See gradle/docker-test.gradle.
+      - name: Gradle build
+        env:
+          ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
+        run: |
+          echo "Building with ARTEFACT_VERSION=$ARTEFACT_VERSION"
+          ./gradlew build -DARTEFACT_VERSION="$ARTEFACT_VERSION"
+
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color || true
+
+      - name: Package Azure Functions zip
+        id: package
+        env:
+          ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
+        run: |
+          ./gradlew azureFunctionsPackageZip \
+            -DARTEFACT_VERSION="$ARTEFACT_VERSION" \
+            -DFUNCTION_APP_NAME="${{ inputs.function_app_name }}"
+          echo "zip_name=${{ inputs.function_app_name }}.zip" >> "$GITHUB_OUTPUT"
+
+      # Guards the two things most likely to break silently: the generated binding, and the
+      # worker-provided jar that must NOT be shipped (see pruneWorkerProvidedJars in build.gradle).
+      - name: Verify packaged zip
+        run: |
+          ZIP="build/azure-functions/${{ inputs.function_app_name }}.zip"
+          test -f "$ZIP" || { echo "::error::$ZIP was not produced"; exit 1; }
+
+          echo "--- zip contents ---"
+          unzip -l "$ZIP"
+
+          unzip -p "$ZIP" PrisonCourtRegisterHearingResulted/function.json > /tmp/function.json
+          grep -q '"type" : "eventGridTrigger"' /tmp/function.json \
+            || { echo "::error::function.json is missing the eventGridTrigger binding"; exit 1; }
+
+          # scriptFile embeds the versioned jar name, so an injected ARTEFACT_VERSION that does not
+          # reach the jar would produce a zip the host cannot load, with an obscure runtime error.
+          SCRIPT_FILE=$(python3 -c "import json;print(json.load(open('/tmp/function.json'))['scriptFile'].replace('../',''))")
+          echo "function.json scriptFile -> $SCRIPT_FILE"
+          unzip -l "$ZIP" | grep -q "$SCRIPT_FILE" \
+            || { echo "::error::scriptFile '$SCRIPT_FILE' is not in the zip — version mismatch"; exit 1; }
+
+          if unzip -l "$ZIP" | grep -q 'azure-functions-java-library'; then
+            echo "::error::azure-functions-java-library was shipped in lib/ — the worker provides it."
+            echo "::error::pruneWorkerProvidedJars did not run. See build.gradle."
+            exit 1
+          fi
+          echo "Zip verified: eventGridTrigger binding present, no worker-provided jars."
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: |
+            build/test-results/test/
+            build/test-results/integrationTest/
+            build/reports/tests/test/
+            build/reports/tests/integrationTest/
+            build/reports/jacoco/test/jacocoTestReport.xml
+          if-no-files-found: warn
+
+      - name: Upload Functions zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: function-app-zip
+          path: build/azure-functions/${{ inputs.function_app_name }}.zip
+          if-no-files-found: error
+
+  # ==========================================================================================
+  # ACTION REQUIRED before this can deploy.
+  #
+  # Needs an Entra app registration with a federated credential for this repo, granted
+  # Contributor (or Website Contributor) on the target Function App, and these repo/environment
+  # secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+  #
+  # The job SKIPS cleanly when AZURE_CLIENT_ID is unset, so PRs and pushes stay green before that
+  # is provisioned — it does not fail, and it does not silently pretend to have deployed.
+  #
+  # The PCR service deploys via ADO pipelines 460/434 (image -> ACR -> Helm/AKS). None of that
+  # applies to a Functions zip, hence Azure/functions-action instead. If the platform team would
+  # rather keep deployment in ADO, replace this job with hmcts/trigger-ado-pipeline against a
+  # Functions-capable pipeline.
+  # ==========================================================================================
+  Deploy:
+    needs: [Artefact-Version, Build]
+    if: ${{ inputs.trigger_deploy }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    permissions:
+      id-token: write   # required for OIDC federated login
+      contents: read
+    steps:
+      # Passed via env rather than interpolated into the script, so the secret is never expanded
+      # into a command line.
+      - name: Check deploy credentials are configured
+        id: creds
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          if [ -z "$AZURE_CLIENT_ID" ]; then
+            echo "::warning::AZURE_CLIENT_ID is not set — skipping deploy."
+            echo "::warning::Provision the Entra federated credential and secrets, then re-run."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download Functions zip
+        if: steps.creds.outputs.configured == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: function-app-zip
+          path: dist
+
+      - name: Azure login (OIDC)
+        if: steps.creds.outputs.configured == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure Functions
+        if: steps.creds.outputs.configured == 'true'
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ inputs.function_app_name }}
+          package: dist/${{ needs.Build.outputs.zip_name }}
+
+      - name: Summarise
+        if: always()
+        run: |
+          if [ "${{ steps.creds.outputs.configured }}" = "true" ]; then
+            echo "Deployed ${{ needs.Artefact-Version.outputs.artefact_version }} to ${{ inputs.function_app_name }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Deploy skipped — Azure credentials not configured. See ci-build-deploy.yml." >> "$GITHUB_STEP_SUMMARY"
+          fi

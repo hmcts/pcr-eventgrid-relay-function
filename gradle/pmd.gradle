@@ -1,0 +1,25 @@
+apply plugin: 'pmd'
+
+pmd {
+  ruleSets = []
+  ruleSetFiles = files(".github/pmd-ruleset.xml")
+  ignoreFailures = false
+}
+
+// Matches service-cp-crime-results-pcr: production code only, and only when explicitly asked for
+// (`./gradlew pmdMain`), so PMD does not slow the ordinary build.
+//
+// Written generically rather than naming pmdTest/pmdIntegrationTest individually: the PMD plugin
+// creates a task per source set, so adding a source set would otherwise silently wire a new PMD task
+// into `check` and break `build` on test-code style rules.
+tasks.withType(Pmd).configureEach {
+  if (name == 'pmdMain') {
+    onlyIf { gradle.startParameter.taskNames.contains(name) }
+  } else {
+    enabled = false
+  }
+  reports {
+    xml.required.set(true)
+    html.required.set(true)
+  }
+}
