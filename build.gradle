@@ -1,7 +1,7 @@
 plugins {
   id 'java'
   id 'jacoco'
-  id 'io.github.ben-manes.versions' version '0.57.0'
+  id 'io.github.ben-manes.versions' version '0.59.0'
   // SBOM for the CodeQL workflow's supply-chain artefact, as in service-cp-crime-results-pcr.
   id 'org.cyclonedx.bom' version '3.3.0'
   // Microsoft's official Azure Functions Gradle plugin — the equivalent of
@@ -47,7 +47,7 @@ dependencies {
   implementation 'com.microsoft.azure.functions:azure-functions-java-library:3.3.0'
 
   // JSON
-  implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.0'
+  implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
 
   // Logging
   implementation 'org.slf4j:slf4j-api:2.0.18'
@@ -55,7 +55,7 @@ dependencies {
 
   // Test — JUnit + AssertJ only, no mocking framework by design.
   // The BOM keeps junit-jupiter and the platform launcher on matching versions.
-  testImplementation platform('org.junit:junit-bom:6.1.1')
+  testImplementation platform('org.junit:junit-bom:6.1.2')
   testImplementation 'org.junit.jupiter:junit-jupiter'
   testImplementation 'org.assertj:assertj-core:3.27.7'
   testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
