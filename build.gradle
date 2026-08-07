@@ -98,6 +98,10 @@ azurefunctions {
     WEBSITE_RUN_FROM_PACKAGE = '1'
     FUNCTIONS_EXTENSION_VERSION = '~4'
     FUNCTIONS_WORKER_RUNTIME = 'java'
+    // The CA bundle ships in the package (see stageInternalCaBundle), so this path is where it
+    // lands. Only applied by azureFunctionsDeploy — a config-zip deploy needs it set separately
+    // with `az functionapp config appsettings set`.
+    PCR_SERVICE_CA_BUNDLE_PATH = '/home/site/wwwroot/internal_ca_certs.pem'
   }
 
   localDebug = "transport=dt_socket,server=y,suspend=n,address=5005"
@@ -128,6 +132,35 @@ tasks.register('pruneWorkerProvidedJars') {
   }
 }
 
+// The PCR service's internal ingress presents a private-CA certificate no JVM ships, so the CA
+// bundle has to travel with the app. Staged into the deployment package so it lands at
+// /home/site/wwwroot/internal_ca_certs.pem — the same place and filename the Node sibling apps use
+// (they point NODE_EXTRA_CA_CERTS at it; we point PCR_SERVICE_CA_BUNDLE_PATH at it).
+//
+// WEBSITE_LOAD_CERTIFICATES is NOT an alternative here: on Linux it exposes certificates as
+// individual DER files under /var/ssl/certs, which AdditiveTrust (a single PEM path) cannot consume.
+def caBundle = layout.projectDirectory.file('internal_ca_certs.pem')
+
+tasks.register('stageInternalCaBundle', Copy) {
+  description = 'Stages the internal CA bundle into the Azure Functions package.'
+  onlyIf {
+    final boolean present = caBundle.asFile.exists()
+    if (!present) {
+      logger.warn("internal_ca_certs.pem not found - the deployed app will not trust the PCR "
+              + "ingress private CA and every relay will fail at the TLS handshake.")
+    }
+    return present
+  }
+  from caBundle
+  into layout.buildDirectory.dir("azure-functions/${functionAppName}")
+}
+
 tasks.named('azureFunctionsPackage') {
-  finalizedBy tasks.named('pruneWorkerProvidedJars')
+  finalizedBy tasks.named('pruneWorkerProvidedJars'), tasks.named('stageInternalCaBundle')
+}
+
+// The zip must be built after the bundle is staged, or it ships without it.
+tasks.matching { it.name == 'azureFunctionsPackageZip' }.configureEach {
+  mustRunAfter tasks.named('stageInternalCaBundle')
+  dependsOn tasks.named('stageInternalCaBundle')
 }
