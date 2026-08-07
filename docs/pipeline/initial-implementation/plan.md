@@ -179,6 +179,38 @@ Only `PCR_SERVICE_INGESTION_ENDPOINT` is required. Also
 Not done: no deployment, and no test against a **real** Azure Event Grid subscription or a live PCR
 service — see open items 1 and 2a. CI has not run yet (no remote).
 
+## 5a. Verified in STE — 7 Aug 2026
+
+Deployed to `fa-ste-ccp0121-pcrrelay` and exercised with a synthetic event posted to
+`/runtime/webhooks/eventgrid`.
+
+| Hop | Result |
+|---|---|
+| App loads on Java 25, function registered | ✅ |
+| Topic → `egs-pcr-relay` → function | ✅ (verified by publishing to the topic) |
+| Parse, `hearingId` extraction | ✅ |
+| **TLS to the PCR ingress** | ✅ — VNet integration + CA bundle + `PCR_SERVICE_CA_BUNDLE_PATH` |
+| Retry / backoff / propagate | ✅ 3 attempts, then 500 so Event Grid redelivers |
+| PCR returns success | ❌ answers **500** |
+
+Three separate causes had to be fixed to get TLS working, and the first two looked identical in the
+logs (`I/O failure … : null`):
+
+1. **No VNet integration** — the app could not route to the internal ingress. The siblings are attached
+   to `sn-ste-ccp0121-courtreg`; ours was not.
+2. **No private-CA trust** — the ingress certificate is issued by a CA no JVM ships. Fixed by
+   `AdditiveTrust` plus shipping the bundle in the package.
+3. **`PCR_SERVICE_CA_BUNDLE_PATH` unset** — the trust code was inert without it, and `config-zip` does
+   not apply the `azurefunctions` appSettings block, so it had to be set explicitly.
+
+**Deploy mechanism correction.** `config-zip` cannot deploy this app: `azureFunctionsDeploy` sets
+`WEBSITE_RUN_FROM_PACKAGE` to a blob SAS URL, and once it holds a URL Kudu ZipDeploy 409s permanently.
+The app therefore diverges from its seven siblings, which use `WEBSITE_RUN_FROM_PACKAGE=1`.
+
+The remaining 500 is the PCR service's. Notably it is not the `503` its contract documents for
+"hearing details not complete yet", so it is erroring on an unknown hearing rather than taking its
+documented not-ready path — a question for that service, not this relay.
+
 ## 6. Open items
 
 | # | Item | Owner | Blocking? |

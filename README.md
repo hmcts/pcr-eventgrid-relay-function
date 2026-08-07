@@ -464,33 +464,76 @@ account key to build `AzureWebJobsStorage`. Read-only or Website-Contributor-onl
 
 ### Deploy
 
-Two options. The second matches how the rest of the estate's function apps are deployed.
+**Use the Gradle plugin. `az functionapp deployment source config-zip` does not work on this app.**
 
 ```bash
-# a) via the Gradle plugin (auth type azure_cli, so `az login` first)
-./gradlew azureFunctionsDeploy
-
-# b) zip deploy, the same command used for the legacy JS function apps
-./gradlew azureFunctionsPackageZip -DARTEFACT_VERSION=0.0.1
-az functionapp deployment source config-zip \
-  -g RG-STE-CCP0121-HEARINGRES \
-  -n fa-ste-ccp0121-pcrrelay \
-  --src build/azure-functions/fa-ste-ccp0121-pcrrelay.zip
+az login                                        # auth type is azure_cli
+./gradlew azureFunctionsDeploy -DARTEFACT_VERSION=0.0.2
 ```
 
-`config-zip` is language-agnostic (Kudu ZipDeploy), and the zip this build produces is already the
-right shape for it — `host.json` at the root, `PrisonCourtRegisterHearingResulted/function.json`, the
-app jar, and `lib/`.
+#### Why not `config-zip`
+
+The two mechanisms are mutually exclusive, and this app is already committed to the plugin's:
+
+| App | `WEBSITE_RUN_FROM_PACKAGE` | Deploy with |
+|---|---|---|
+| `fa-ste-ccp0121-pcrrelay` (this one) | a **blob SAS URL** | `azureFunctionsDeploy` |
+| the seven Node siblings | `1` | `config-zip` |
+
+`azureFunctionsDeploy` uploads the package to `sasteccp0121hearingres` and points
+`WEBSITE_RUN_FROM_PACKAGE` at a SAS URL for that blob. Once the setting holds a URL, the app runs from
+that fixed blob and Kudu ZipDeploy has nothing to update, so `config-zip` fails with:
+
+```
+Deployment endpoint responded with status code 409
+There may be an ongoing deployment or your app setting has WEBSITE_RUN_FROM_PACKAGE.
+```
+
+That 409 is **permanent, not transient** — retrying will not clear it. An earlier revision of this
+README recommended `config-zip` as the primary route on the grounds that it matches the siblings; that
+was written before the app existed and is wrong for it.
+
+To switch to `config-zip` instead you would have to set `WEBSITE_RUN_FROM_PACKAGE=1`, matching the
+siblings. Worth doing if consistency with them matters more than the plugin's convenience — but note
+the plugin also applies the `azurefunctions` `appSettings` block on every deploy, which `config-zip`
+does not, so `PCR_SERVICE_CA_BUNDLE_PATH` would then need setting by hand.
+
+The zip itself is fine either way — `host.json` at the root,
+`PrisonCourtRegisterHearingResulted/function.json`, the app jar, `lib/`, and `internal_ca_certs.pem`.
 
 > **The Azure Portal cannot deploy this app's code.** Java has no in-portal editing — the Functions
 > language-support matrix lists Java as Linux ✓ / Windows ✓ / in-portal editing ✗; only script
 > languages (JS, Python, PowerShell) get the editor. Creating the *resource* in the Portal is fine;
 > the code must come from zip deploy, the Gradle plugin, or CI.
 
-> **If you create the app by hand, set the runtime to Java 25 on Linux.** `config-zip` ships content
-> only — it does not set `FUNCTIONS_WORKER_RUNTIME=java` or `linuxFxVersion=JAVA|25`. An app created as
-> Node (the obvious default in a resource group where all seven siblings are Node) will accept the
-> deploy, report success, and never fire the function.
+> **If you create the app by hand, set the runtime to Java 25 on Linux.** Neither deploy mechanism
+> sets `FUNCTIONS_WORKER_RUNTIME=java` or `linuxFxVersion=JAVA|25`. An app created as Node (the obvious
+> default in a resource group where all seven siblings are Node) will accept the deploy, report
+> success, and never fire the function.
+
+#### What has been verified in STE
+
+As of 7 Aug 2026, deployed to `fa-ste-ccp0121-pcrrelay` and exercised by POSTing a synthetic event to
+`/runtime/webhooks/eventgrid`:
+
+| | |
+|---|---|
+| App loads on Java 25, function registered | ✅ |
+| Event Grid delivery via `egs-pcr-relay` | ✅ (verified separately by publishing to the topic) |
+| Event parsed, `hearingId` extracted | ✅ |
+| **TLS to the PCR ingress** | ✅ — the private-CA trust works |
+| Retry/backoff and propagate-on-exhaustion | ✅ 3 attempts, then 500 so Event Grid redelivers |
+| PCR service returns success | ❌ — it answers **500** |
+
+The remaining failure is the PCR service's, not this relay's. Note it is a `500`, not the `503` its
+contract documents for "hearing details not complete yet" — so for a synthetic `hearingId` it is
+erroring rather than taking its documented not-ready path. Worth checking against that service's own
+logs before assuming anything about this app.
+
+Diagnostic value of the log line: `Retryable status 500 from …` means the handshake completed and an
+HTTP round-trip happened. `I/O failure … ConnectException` would mean the request never arrived — the
+two are easy to conflate and the distinction is the fastest way to tell a network/TLS problem from a
+service problem.
 
 ### Wire the Event Grid subscription
 
