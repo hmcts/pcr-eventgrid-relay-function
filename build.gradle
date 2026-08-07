@@ -141,7 +141,17 @@ tasks.register('pruneWorkerProvidedJars') {
 // individual DER files under /var/ssl/certs, which AdditiveTrust (a single PEM path) cannot consume.
 def caBundle = layout.projectDirectory.file('internal_ca_certs.pem')
 
-tasks.register('stageInternalCaBundle', Copy) {
+// Deliberately NOT a Copy task, and this is load-bearing. A Copy's `into` directory becomes a
+// declared task output, and azureFunctionsPackage already declares that same directory as *its*
+// output. Overlapping outputs make Gradle's up-to-date checking and stale-output cleanup unreliable
+// for both tasks, and the observed result on CI was a staged app containing only this PEM: the
+// Functions host then started cleanly, logged "0 functions found", served nothing, and the
+// integration tests spent five minutes waiting for a function that had never been staged.
+// Copying by hand keeps the staging directory owned by exactly one task. Do not "tidy" this back
+// into a Copy.
+def stagedAppDir = layout.buildDirectory.dir("azure-functions/${functionAppName}")
+
+tasks.register('stageInternalCaBundle') {
   description = 'Stages the internal CA bundle into the Azure Functions package.'
   onlyIf {
     final boolean present = caBundle.asFile.exists()
@@ -151,16 +161,54 @@ tasks.register('stageInternalCaBundle', Copy) {
     }
     return present
   }
-  from caBundle
-  into layout.buildDirectory.dir("azure-functions/${functionAppName}")
+  // The staging directory belongs to azureFunctionsPackage, so this task declares no outputs of its
+  // own and simply always runs.
+  outputs.upToDateWhen { false }
+  doLast {
+    final File target = stagedAppDir.get().asFile
+    target.mkdirs()
+    final File source = caBundle.asFile
+    java.nio.file.Files.copy(source.toPath(), new File(target, source.name).toPath(),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    logger.lifecycle("Staged ${source.name} into ${target.name}/")
+  }
+}
+
+// An incomplete staged app fails in the least helpful way available: the host boots, reports itself
+// healthy, serves no functions, and every caller times out instead of erroring. Assert the package
+// is complete while there is still a build log to read the reason in.
+tasks.register('verifyStagedApp') {
+  description = 'Fails fast if the staged Azure Functions app is missing host.json or the function.'
+  outputs.upToDateWhen { false }
+  doLast {
+    final File dir = stagedAppDir.get().asFile
+    final List<String> required = ['host.json', 'PrisonCourtRegisterHearingResulted/function.json']
+    final List<String> missing = required.findAll { !new File(dir, it).isFile() }
+    if (!missing.isEmpty()) {
+      final List<String> present = dir.isDirectory() ? (dir.list()?.sort() ?: ['<empty>'])
+              : ['<directory does not exist>']
+      throw new GradleException("The staged Azure Functions app at ${dir} is incomplete.\n"
+              + "  missing: ${missing}\n"
+              + "  present: ${present}\n"
+              + "The Functions host would start, find no functions and serve nothing, so anything\n"
+              + "waiting on it times out rather than failing. Check that azureFunctionsPackage ran,\n"
+              + "and that no other task declares the staging directory as an output (see\n"
+              + "stageInternalCaBundle).")
+    }
+  }
 }
 
 tasks.named('azureFunctionsPackage') {
   finalizedBy tasks.named('pruneWorkerProvidedJars'), tasks.named('stageInternalCaBundle')
 }
 
-// The zip must be built after the bundle is staged, or it ships without it.
+tasks.named('verifyStagedApp') {
+  mustRunAfter tasks.named('azureFunctionsPackage'), tasks.named('stageInternalCaBundle')
+}
+
+// The zip must be built after the bundle is staged, or it ships without it — and must never be built
+// from an incomplete staging directory.
 tasks.matching { it.name == 'azureFunctionsPackageZip' }.configureEach {
   mustRunAfter tasks.named('stageInternalCaBundle')
-  dependsOn tasks.named('stageInternalCaBundle')
+  dependsOn tasks.named('stageInternalCaBundle'), tasks.named('verifyStagedApp')
 }
