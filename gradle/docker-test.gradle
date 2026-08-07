@@ -15,7 +15,11 @@ dockerCompose {
 
     buildBeforeUp = false
     waitForTcpPorts = true
-    upAdditionalArgs = ['--wait', '--wait-timeout', '180']
+    // 300s, not 180s: a cold runner pulls ~500MB for the Functions image before the container can
+    // even start. FunctionsHostClient.awaitReady() then allows a further 5 minutes for the Java
+    // worker to load the function, which is a separate wait — compose reporting "healthy" only means
+    // the .NET host bound its port.
+    upAdditionalArgs = ['--wait', '--wait-timeout', '300']
 
     captureContainersOutput = true
     removeOrphans = true

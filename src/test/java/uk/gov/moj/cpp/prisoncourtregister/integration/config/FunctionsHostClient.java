@@ -55,7 +55,11 @@ public final class FunctionsHostClient {
      */
     public static void awaitReady() {
         Awaitility.await("Azure Functions host ready")
-                .atMost(Duration.ofMinutes(2))
+                // 5 minutes, not 2. On a machine with the image cached the host is ready in seconds,
+                // which is what an earlier 2-minute value was (wrongly) tuned against. A cold CI
+                // runner has to pull ~500MB and then cold-start a Java Functions host, and 2 minutes
+                // was not enough — it failed in GitHub Actions while passing locally every time.
+                .atMost(Duration.ofMinutes(5))
                 .pollInterval(Duration.ofSeconds(2))
                 .ignoreExceptions()
                 .until(() -> deliverNotification("[]").statusCode() < 400);

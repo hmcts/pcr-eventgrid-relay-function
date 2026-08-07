@@ -93,12 +93,33 @@ jobs:
       # composeUp/composeDown sequencing here: `check` depends on the `integrationTest` task, and
       # dockerCompose.isRequiredBy brings the stack up before it and tears it down afterwards —
       # including when tests fail. See gradle/docker-test.gradle.
+      # Pulled explicitly so the ~500MB download is its own step rather than eating into the
+      # integration test's readiness budget. A cold runner previously spent that budget downloading
+      # and the host-ready wait timed out, failing CI while passing locally every time.
+      - name: Pre-pull the Azure Functions image
+        run: docker pull mcr.microsoft.com/azure-functions/java:4-java25
+
       - name: Gradle build
         env:
           ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
         run: |
           echo "Building with ARTEFACT_VERSION=$ARTEFACT_VERSION"
           ./gradlew build -DARTEFACT_VERSION="$ARTEFACT_VERSION"
+
+      # A green `build` is not proof the integration tests ran — if they were skipped or never
+      # selected, `build` still passes. Assert the suite executed with a non-zero test count, because
+      # a silently-empty integration suite reads exactly like a passing one.
+      - name: Assert the integration tests actually ran
+        run: |
+          RESULTS=build/test-results/integrationTest
+          if [ ! -d "$RESULTS" ]; then
+            echo "::error::$RESULTS is missing - the integration tests did not run"; exit 1
+          fi
+          TOTAL=$(grep -ho 'tests="[0-9]*"' "$RESULTS"/*.xml | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
+          echo "integration tests executed: $TOTAL"
+          if [ "$TOTAL" -lt 1 ]; then
+            echo "::error::integration suite reported $TOTAL tests"; exit 1
+          fi
 
       - name: Dump compose logs on failure
         if: failure()

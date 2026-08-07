@@ -4,6 +4,12 @@ services:
   # be deployed. composeUp depends on that task — see gradle/docker-test.gradle.
   functions:
     image: mcr.microsoft.com/azure-functions/java:4-java25
+    # Required, not cosmetic. The image is published for linux/amd64 only. On Apple Silicon,
+    # `docker compose` refuses to pull it — "no matching manifest for linux/arm64/v8" — where
+    # `docker run` would silently fall back to emulation. Without this line a developer on arm64
+    # with a cold image cache cannot run the integration tests at all; it only appears to work if
+    # the image happens to be cached already. No effect on amd64 CI runners.
+    platform: linux/amd64
     environment:
       AzureWebJobsScriptRoot: /home/site/wwwroot
       FUNCTIONS_WORKER_RUNTIME: java
