@@ -161,6 +161,7 @@ holds keys, never commit it).
 | Setting | Required | Default | Purpose |
 |---|---|---|---|
 | `PCR_SERVICE_INGESTION_ENDPOINT` | yes | — | Absolute URL of `POST /internal/hearing-results`. Missing/blank fails fast at startup |
+| `PCR_SERVICE_CA_BUNDLE_PATH` | **in Azure** | — | PEM bundle of extra CAs to trust, added to the JVM defaults. The PCR internal ingress presents a private-CA certificate no JVM ships, so TLS fails without it. Unset locally (tests use plain HTTP) |
 | `PCR_SERVICE_INGRESS_HEADER_NAME` | no | — | Header an ingress fronting the service requires. Applied only when both name and value are set |
 | `PCR_SERVICE_INGRESS_HEADER_VALUE` | no | — | Value for the above |
 | `FORWARD_MAX_ATTEMPTS` | no | `3` | Total attempts per delivery, including the first |

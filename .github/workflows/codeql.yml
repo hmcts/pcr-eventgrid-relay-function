@@ -50,7 +50,15 @@ jobs:
           gradle-version: current
 
       - name: Gradle Build
-        run: ./gradlew build cyclonedxBom -x test
+        # CodeQL only needs the compilation to trace, so skip BOTH test suites.
+        #
+        # `-x integrationTest` is not optional: that task is wired into `check` (and therefore
+        # `build`), and dockerCompose.isRequiredBy makes it start the Functions container plus
+        # WireMock. Leaving it in makes CodeQL package the app, pull a ~500MB image and boot a Java
+        # host inside its build tracer — which ran for 15 minutes and got cancelled.
+        #
+        # `-x test` alone was sufficient only while the integration tests lived inside `test`.
+        run: ./gradlew build cyclonedxBom -x test -x integrationTest
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
