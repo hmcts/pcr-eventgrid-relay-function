@@ -25,6 +25,13 @@ on:
         required: false
       GITLEAKS_LICENSE:
         required: false
+      PCR_INTERNAL_CA_BUNDLE:
+        required: false
+        description: >-
+          PEM bundle for the PCR ingress private CA chain, held in infrastructure rather than in this
+          repo. When set, the Build job writes it outside the repo tree and points CA_BUNDLE_SOURCE
+          at it, so that is what ships in the zip. When unset, the build falls back to the copy
+          committed in the repo root and warns. See docs/TODO-production-readiness.md 4.1.
     inputs:
       environment:
         required: true
@@ -93,12 +100,71 @@ jobs:
       # composeUp/composeDown sequencing here: `check` depends on the `integrationTest` task, and
       # dockerCompose.isRequiredBy brings the stack up before it and tears it down afterwards —
       # including when tests fail. See gradle/docker-test.gradle.
+      # Pulled explicitly so the ~500MB download is its own step rather than eating into the
+      # integration test's readiness budget. A cold runner previously spent that budget downloading
+      # and the host-ready wait timed out, failing CI while passing locally every time.
+      - name: Pre-pull the Azure Functions image
+        run: docker pull mcr.microsoft.com/azure-functions/java:4-java25
+
+      # No certificate material is tracked in this repository, so the bundle can only come from
+      # infrastructure. Without this secret the packaged app has no CA bundle at all.
+      #
+      # Written to RUNNER_TEMP, deliberately outside the workspace: a PEM materialised inside the repo
+      # tree can be committed by accident and trips the secret scanners. CA_BUNDLE_SOURCE is exported
+      # via GITHUB_ENV so both the `build` and the packaging step below pick it up; build.gradle fails
+      # the build if it points at nothing or at a file with no certificate in it.
+      - name: Materialise the internal CA bundle from infrastructure
+        env:
+          CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
+        run: |
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "::warning::PCR_INTERNAL_CA_BUNDLE is not set - this build will package no CA bundle."
+            echo "::warning::The artefact is still valid, but a deployed app would fail every relay at the TLS handshake."
+            echo "::warning::See docs/TODO-production-readiness.md 4.1."
+            exit 0
+          fi
+
+          DEST="$RUNNER_TEMP/internal_ca_certs.pem"
+          printf '%s\n' "$CA_BUNDLE" > "$DEST"
+
+          # Tolerate a base64-encoded secret, which is how a PEM is often stored to survive
+          # copy-paste and single-line secret fields.
+          if ! grep -q 'BEGIN CERTIFICATE' "$DEST"; then
+            if base64 -d < "$DEST" > "$DEST.decoded" 2>/dev/null && grep -q 'BEGIN CERTIFICATE' "$DEST.decoded"; then
+              mv "$DEST.decoded" "$DEST"
+              echo "Secret was base64-encoded; decoded it."
+            else
+              rm -f "$DEST.decoded"
+              echo "::error::PCR_INTERNAL_CA_BUNDLE is set but is neither a PEM nor base64-encoded PEM."
+              exit 1
+            fi
+          fi
+
+          chmod 600 "$DEST"
+          echo "CA_BUNDLE_SOURCE=$DEST" >> "$GITHUB_ENV"
+          echo "Staged $(grep -c 'BEGIN CERTIFICATE' "$DEST") certificate(s) for packaging."
+
       - name: Gradle build
         env:
           ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
         run: |
           echo "Building with ARTEFACT_VERSION=$ARTEFACT_VERSION"
           ./gradlew build -DARTEFACT_VERSION="$ARTEFACT_VERSION"
+
+      # A green `build` is not proof the integration tests ran — if they were skipped or never
+      # selected, `build` still passes. Assert the suite executed with a non-zero test count, because
+      # a silently-empty integration suite reads exactly like a passing one.
+      - name: Assert the integration tests actually ran
+        run: |
+          RESULTS=build/test-results/integrationTest
+          if [ ! -d "$RESULTS" ]; then
+            echo "::error::$RESULTS is missing - the integration tests did not run"; exit 1
+          fi
+          TOTAL=$(grep -ho 'tests="[0-9]*"' "$RESULTS"/*.xml | grep -o '[0-9]*' | awk '{s+=$1} END {print s+0}')
+          echo "integration tests executed: $TOTAL"
+          if [ "$TOTAL" -lt 1 ]; then
+            echo "::error::integration suite reported $TOTAL tests"; exit 1
+          fi
 
       - name: Dump compose logs on failure
         if: failure()
@@ -140,6 +206,24 @@ jobs:
             echo "::error::pruneWorkerProvidedJars did not run. See build.gradle."
             exit 1
           fi
+
+          # Mirrors verifyStagedApp, at the zip rather than the staging directory: if a bundle was
+          # available at build time it must actually be in the artefact. A zip without it deploys
+          # fine and then fails every relay at the TLS handshake.
+          if [ -n "${CA_BUNDLE_SOURCE:-}" ]; then
+            unzip -l "$ZIP" | grep -q 'internal_ca_certs.pem' \
+              || { echo "::error::CA_BUNDLE_SOURCE was set but the bundle is not in the zip"; exit 1; }
+            echo "CA bundle present in the zip, from infrastructure."
+          else
+            # No certificate material is tracked in this repo, so with the secret unset there is
+            # nothing for CI to package. The zip is fine for review and for the Deploy job to
+            # publish, but the running app cannot complete TLS to the PCR ingress until the bundle
+            # is supplied.
+            echo "::warning::No CA bundle in this artefact - PCR_INTERNAL_CA_BUNDLE is not set."
+            echo "::warning::Deploying this zip gives an app that fails every relay at the TLS handshake."
+            echo "::warning::See docs/TODO-production-readiness.md 4.1."
+          fi
+
           echo "Zip verified: eventGridTrigger binding present, no worker-provided jars."
 
       - name: Upload test results

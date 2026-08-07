@@ -15,7 +15,14 @@ dockerCompose {
 
     buildBeforeUp = false
     waitForTcpPorts = true
-    upAdditionalArgs = ['--wait', '--wait-timeout', '180']
+    // Generous because a cold runner may pull ~500MB for the Functions image before the container
+    // can start (CI pre-pulls it in its own step to keep that out of this budget).
+    //
+    // Do NOT reach for a longer timeout when the suite fails to start: a timeout here means the
+    // container never ran, and a timeout in FunctionsHostClient.awaitReady() means the host ran but
+    // served no function — usually an incomplete staging directory, which verifyStagedApp now
+    // catches before the stack even comes up. Neither is a slowness problem.
+    upAdditionalArgs = ['--wait', '--wait-timeout', '300']
 
     captureContainersOutput = true
     removeOrphans = true
@@ -49,8 +56,17 @@ tasks.named('check') {
 
 // The functions service mounts the packaged app and needs seeded host keys, so both must exist
 // before the stack comes up.
+//
+// verifyStagedApp is what stops the worst failure mode here from recurring: if the mounted staging
+// directory is incomplete, the host starts, finds no functions and serves nothing, so
+// FunctionsHostClient.awaitReady() burns its whole timeout and the suite reports a timeout rather
+// than the real cause. Asserting the package before the container starts turns five silent minutes
+// into an immediate, named failure.
 tasks.named('composeUp').configure {
-    dependsOn tasks.named('azureFunctionsPackage'), tasks.named('prepareFunctionsHostSecrets')
+    dependsOn tasks.named('azureFunctionsPackage'),
+            tasks.named('stageInternalCaBundle'),
+            tasks.named('verifyStagedApp'),
+            tasks.named('prepareFunctionsHostSecrets')
 }
 
 // The Functions host protects /runtime/webhooks/eventgrid with the eventgrid_extension system key.

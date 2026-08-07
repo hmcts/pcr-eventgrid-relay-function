@@ -15,6 +15,7 @@ jobs:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      PCR_INTERNAL_CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
     with:
       environment: dev
       is_release: true

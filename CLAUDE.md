@@ -49,6 +49,35 @@ Consequences to respect:
   transform logic (design §5); the legacy app keeps its own copy for the PDF path. The two need
   keeping in step.
 
+## Internal CA trust — `internal_ca_certs.pem`
+
+The PCR internal ingress uses a **private CA** no JVM ships, so without it every relay fails at the
+TLS handshake — as a bare `IOException`, not an HTTP status. `AdditiveTrust` assembles a trust store
+from `PCR_SERVICE_CA_BUNDLE_PATH`, adding those CAs to the platform defaults (never replacing them).
+`NODE_EXTRA_CA_CERTS`, which the Node siblings use, has no JVM equivalent.
+
+**No certificate material is tracked in this repo.** `stageInternalCaBundle` takes the bundle from
+`CA_BUNDLE_SOURCE` when set — which is what CI does, materialising it from the
+`PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — and otherwise from `.local/internal_ca_certs.pem`,
+which is git-ignored and exists only on a developer machine. A set-but-missing or non-PEM
+`CA_BUNDLE_SOURCE` **fails the build** rather than falling back, so CI can never silently ship a
+certificate infrastructure did not supply. With neither source the build warns and packages nothing,
+which is correct locally but would break a deployment.
+
+The bundle *was* committed for a period, so it is still in git history: the repo stays **private**
+until that history is rewritten (TODO 4.1). Do not re-add a PEM to the working tree — `.gitignore`
+blocks `.local/` and the bare filename at any path on purpose.
+Full rationale, rejected alternatives and prerequisites are in README.md under "Internal CA trust".
+
+Do not "simplify" any of this without reading that section:
+
+- `WEBSITE_LOAD_CERTIFICATES` is not an alternative — on Linux it yields DER files under
+  `/var/ssl/certs`, not a PEM bundle at one path.
+- Trust must stay **additive**. Trusting only the private CA silently breaks TLS to every public
+  endpoint, and a test asserts the store is `platform defaults + 1`.
+- The build must keep succeeding-with-a-warning when the bundle is missing, so the CI-fetch migration
+  can land without a chicken-and-egg failure.
+
 ## Build & Test Commands
 
 **Gradle**, deliberately mirroring `service-cp-crime-results-pcr`: same wrapper (9.6.1), same Java 25
@@ -62,7 +91,10 @@ toolchain, same `gradle/*.gradle` convention-script split, same `.github/pmd-rul
 ./gradlew azureFunctionsPackage      # staging dir: build/azure-functions/<appName>/
 ./gradlew azureFunctionsPackageZip   # deployable zip: build/azure-functions/<appName>.zip
 ./gradlew azureFunctionsRun          # run locally (needs local.settings.json in the repo root)
-./gradlew azureFunctionsDeploy       # needs `az login` (auth type azure_cli)
+./gradlew azureFunctionsDeploy       # THE deploy route; needs `az login` (auth type azure_cli)
+                                     #   NOT config-zip: the app's WEBSITE_RUN_FROM_PACKAGE is a
+                                     #   blob SAS URL set by this plugin, so Kudu ZipDeploy 409s
+                                     #   permanently. See README "Why not config-zip".
 ```
 
 Requires a **JDK 25** — the Gradle toolchain pins `JavaLanguageVersion.of(25)`. Compilation also runs

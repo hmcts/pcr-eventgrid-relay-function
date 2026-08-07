@@ -177,6 +177,124 @@ repo. Per the PCR design, the existing subscription is `pcr-hearing-results` / e
 `eg-ste-ccp0121-hearingres`; repointing it from the PCR service's webhook to this Function App is a
 platform-team change.
 
+## Internal CA trust — why `internal_ca_certs.pem` is here
+
+### Why it is needed
+
+The PCR service sits behind an **internal ingress** whose TLS certificate is issued by a **private
+CA** that no JVM ships in its default trust store. Without that CA, the relay cannot complete a TLS
+handshake and every event fails — not with a `503` or a `404`, but with a bare I/O error and no HTTP
+response at all.
+
+This is easy to misdiagnose. When first deployed, the relay failed identically *before* and *after*
+VNet integration was added; the logs said only `I/O failure … : null`, because `ConnectException` and
+`SSLHandshakeException` both surface as `IOException` and the latter's message can be empty. It took a
+comparison against the sibling apps' configuration to find the cause. (The logging now names the
+exception type precisely so this is one step, not three.)
+
+The Node sibling apps solve it with `NODE_EXTRA_CA_CERTS`, pointing at a PEM shipped in their
+package. **The JVM has no equivalent** — it will not read a PEM from an environment variable — so the
+trust store has to be assembled in code. `AdditiveTrust` does that, adding the bundle's CAs to the
+platform defaults rather than replacing them.
+
+Two non-options, recorded so they are not retried:
+
+| Rejected | Why |
+|---|---|
+| `WEBSITE_LOAD_CERTIFICATES` | On Linux this exposes certificates as individual **DER** files under `/var/ssl/certs`. `AdditiveTrust` takes a single PEM bundle path and cannot consume a directory of DERs without further change |
+| Importing into the JVM's `cacerts` | Requires a startup command mutating the JDK inside a managed Functions host. Fragile, and invisible to anyone reading the app config |
+
+### How it is addressed — two sources, one staged path
+
+`stageInternalCaBundle` stages the bundle into the deployment package at
+`/home/site/wwwroot/internal_ca_certs.pem` — the same path and filename the siblings use, and what
+`PCR_SERVICE_CA_BUNDLE_PATH` points at. Where the bundle comes *from* depends on `CA_BUNDLE_SOURCE`:
+
+| `CA_BUNDLE_SOURCE` | Source used | If it is missing or not a PEM |
+|---|---|---|
+| set (CI) | that path | **build fails** |
+| unset (local) | `.local/internal_ca_certs.pem` (git-ignored) | warns, packages without it |
+
+CI materialises the bundle from the `PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — outside the
+workspace, so it cannot be committed by accident — and exports `CA_BUNDLE_SOURCE`. The staged filename
+is always `internal_ca_certs.pem` whatever the source file is called, because the app setting names
+that exact path.
+
+The asymmetry is deliberate. Locally a missing bundle is an inconvenience, and the integration tests
+use plain HTTP so they do not need one. In CI, silently falling back to a committed certificate when
+infrastructure was *supposed* to supply one would ship something nobody reviewed — so a set-but-broken
+`CA_BUNDLE_SOURCE` fails the build rather than degrading. An unset GitHub secret expands to an empty
+string, so the build also rejects a file containing no `BEGIN CERTIFICATE` block, and both
+`verifyStagedApp` and the CI zip check assert the bundle actually reached the artefact.
+
+### The repository no longer tracks any certificate
+
+No certificate material is checked in. `.gitignore` excludes `.local/` and the bare filename
+`internal_ca_certs.pem` at any path, the latter specifically so the bundle cannot drift back to the
+repo root where it used to live.
+
+**This does not undo the past.** The bundle *was* committed for a period, so it remains in git history
+and in every existing clone and fork. Two consequences:
+
+- **The repo must stay private for now.** It was public initially, and the certificates were
+  deliberately kept out of it: they carry internal domain names, and the PCR design doc redacts the
+  equivalent hostname as "not for a public repo". Going private was a decision taken specifically to
+  allow committing the bundle, and it has costs — code scanning on private repos needs GitHub Advanced
+  Security, and Actions minutes bill against the org quota. Returning to public needs a **history
+  rewrite**, tracked in TODO 4.1.
+- **Treat those CAs as exposed to anyone who has ever cloned the repo.** If that is not acceptable,
+  the CAs need rotating rather than merely un-committing.
+
+Until the `PCR_INTERNAL_CA_BUNDLE` secret is set, **CA rotation is still a manual step** for whoever
+deploys — they need the current bundle at `.local/internal_ca_certs.pem`.
+
+### What is left to do
+
+The build and CI wiring for an infrastructure-supplied bundle is **in place**:
+
+```
+ci-build-deploy.yml
+  └─ Build job
+       1. Materialise the internal CA bundle   →  $RUNNER_TEMP/internal_ca_certs.pem
+          (from the PCR_INTERNAL_CA_BUNDLE secret; base64 or plain PEM)
+          exports CA_BUNDLE_SOURCE
+       2. ./gradlew build                      ← stageInternalCaBundle reads CA_BUNDLE_SOURCE
+       3. ./gradlew azureFunctionsPackageZip
+       4. Verify packaged zip                  ← asserts the bundle is in the artefact
+```
+
+Two things remain, and neither is a code change:
+
+- **Set `PCR_INTERNAL_CA_BUNDLE`** as a repo or environment secret. Until then CI warns and packages
+  **no bundle at all** — the artefact is valid and the build is green, but deploying it gives an app
+  that fails every relay at the TLS handshake. Until it is set, deploy from a local build that has
+  `.local/internal_ca_certs.pem` in place.
+- **Rewrite history** to remove the previously-committed bundle, if the repo is to go public again.
+
+If the bundle would rather live in Key Vault than a GitHub secret, only step 1 changes — swap the
+secret for `azure/login` plus `az keyvault secret download`, writing to the same path and exporting
+the same variable. Nothing downstream cares where the file came from. Note this needs the same
+federated credential as TODO 1.3.
+
+What finishing this buys:
+
+- the repo can go **public again**, matching the rest of the estate;
+- **CA rotation is an infrastructure change** — update the Key Vault secret, redeploy, no code commit;
+- no certificate material in git history;
+- local development is unaffected: the bundle stays optional, and the integration tests use plain HTTP.
+
+What it needs, and why it is not done yet:
+
+1. **A source of truth** — a Key Vault secret (preferred, rotatable and access-controlled) or a GitHub
+   Actions secret (simpler, but another copy to keep in step). The platform team owns this choice.
+2. **Read access for CI** — the same Entra federated credential the `Deploy` job is waiting on, plus
+   `get` on that secret. Worth requesting together rather than twice.
+3. **Removing the committed bundle**, and deciding whether history needs rewriting before the repo
+   could return to public.
+
+Until (1) and (2) exist, the committed bundle is what makes the relay work at all — so it stays, with
+this section as the record of why it is temporary.
+
 ## Build & test
 
 Gradle, matching [`service-cp-crime-results-pcr`](../service-cp-crime-results-pcr) — same wrapper
@@ -379,33 +497,76 @@ account key to build `AzureWebJobsStorage`. Read-only or Website-Contributor-onl
 
 ### Deploy
 
-Two options. The second matches how the rest of the estate's function apps are deployed.
+**Use the Gradle plugin. `az functionapp deployment source config-zip` does not work on this app.**
 
 ```bash
-# a) via the Gradle plugin (auth type azure_cli, so `az login` first)
-./gradlew azureFunctionsDeploy
-
-# b) zip deploy, the same command used for the legacy JS function apps
-./gradlew azureFunctionsPackageZip -DARTEFACT_VERSION=0.0.1
-az functionapp deployment source config-zip \
-  -g RG-STE-CCP0121-HEARINGRES \
-  -n fa-ste-ccp0121-pcrrelay \
-  --src build/azure-functions/fa-ste-ccp0121-pcrrelay.zip
+az login                                        # auth type is azure_cli
+./gradlew azureFunctionsDeploy -DARTEFACT_VERSION=0.0.2
 ```
 
-`config-zip` is language-agnostic (Kudu ZipDeploy), and the zip this build produces is already the
-right shape for it — `host.json` at the root, `PrisonCourtRegisterHearingResulted/function.json`, the
-app jar, and `lib/`.
+#### Why not `config-zip`
+
+The two mechanisms are mutually exclusive, and this app is already committed to the plugin's:
+
+| App | `WEBSITE_RUN_FROM_PACKAGE` | Deploy with |
+|---|---|---|
+| `fa-ste-ccp0121-pcrrelay` (this one) | a **blob SAS URL** | `azureFunctionsDeploy` |
+| the seven Node siblings | `1` | `config-zip` |
+
+`azureFunctionsDeploy` uploads the package to `sasteccp0121hearingres` and points
+`WEBSITE_RUN_FROM_PACKAGE` at a SAS URL for that blob. Once the setting holds a URL, the app runs from
+that fixed blob and Kudu ZipDeploy has nothing to update, so `config-zip` fails with:
+
+```
+Deployment endpoint responded with status code 409
+There may be an ongoing deployment or your app setting has WEBSITE_RUN_FROM_PACKAGE.
+```
+
+That 409 is **permanent, not transient** — retrying will not clear it. An earlier revision of this
+README recommended `config-zip` as the primary route on the grounds that it matches the siblings; that
+was written before the app existed and is wrong for it.
+
+To switch to `config-zip` instead you would have to set `WEBSITE_RUN_FROM_PACKAGE=1`, matching the
+siblings. Worth doing if consistency with them matters more than the plugin's convenience — but note
+the plugin also applies the `azurefunctions` `appSettings` block on every deploy, which `config-zip`
+does not, so `PCR_SERVICE_CA_BUNDLE_PATH` would then need setting by hand.
+
+The zip itself is fine either way — `host.json` at the root,
+`PrisonCourtRegisterHearingResulted/function.json`, the app jar, `lib/`, and `internal_ca_certs.pem`.
 
 > **The Azure Portal cannot deploy this app's code.** Java has no in-portal editing — the Functions
 > language-support matrix lists Java as Linux ✓ / Windows ✓ / in-portal editing ✗; only script
 > languages (JS, Python, PowerShell) get the editor. Creating the *resource* in the Portal is fine;
 > the code must come from zip deploy, the Gradle plugin, or CI.
 
-> **If you create the app by hand, set the runtime to Java 25 on Linux.** `config-zip` ships content
-> only — it does not set `FUNCTIONS_WORKER_RUNTIME=java` or `linuxFxVersion=JAVA|25`. An app created as
-> Node (the obvious default in a resource group where all seven siblings are Node) will accept the
-> deploy, report success, and never fire the function.
+> **If you create the app by hand, set the runtime to Java 25 on Linux.** Neither deploy mechanism
+> sets `FUNCTIONS_WORKER_RUNTIME=java` or `linuxFxVersion=JAVA|25`. An app created as Node (the obvious
+> default in a resource group where all seven siblings are Node) will accept the deploy, report
+> success, and never fire the function.
+
+#### What has been verified in STE
+
+As of 7 Aug 2026, deployed to `fa-ste-ccp0121-pcrrelay` and exercised by POSTing a synthetic event to
+`/runtime/webhooks/eventgrid`:
+
+| | |
+|---|---|
+| App loads on Java 25, function registered | ✅ |
+| Event Grid delivery via `egs-pcr-relay` | ✅ (verified separately by publishing to the topic) |
+| Event parsed, `hearingId` extracted | ✅ |
+| **TLS to the PCR ingress** | ✅ — the private-CA trust works |
+| Retry/backoff and propagate-on-exhaustion | ✅ 3 attempts, then 500 so Event Grid redelivers |
+| PCR service returns success | ❌ — it answers **500** |
+
+The remaining failure is the PCR service's, not this relay's: it answers `500` with
+`{"message":"Unable to connect to Redis"}`. That also explains why it is not the `503` its contract
+documents for "hearing details not complete yet" — that path assumes Redis is reachable and the entry
+merely absent, whereas here the connection itself fails.
+
+Diagnostic value of the log line: `Retryable status 500 from …` means the handshake completed and an
+HTTP round-trip happened. `I/O failure … ConnectException` would mean the request never arrived — the
+two are easy to conflate and the distinction is the fastest way to tell a network/TLS problem from a
+service problem.
 
 ### Wire the Event Grid subscription
 
@@ -444,6 +605,16 @@ CI uses OIDC federated credentials rather than `az login`; `-DARTEFACT_VERSION=`
 - **Provisioning route.** 30+ identically-shaped `*-HEARINGRES` resource groups imply central
   automation, and no IaC for them was found. Prefer having the platform team create the app rather than
   running `functionapp create` by hand, so it does not drift from whatever produces the rest.
+
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Step-by-step runbook for non-local environments — required permissions, per-environment settings, provisioning, VNet integration, deploy, Event Grid wiring, smoke testing, rollback, and every failure mode hit for real |
+| [`docs/TODO-production-readiness.md`](docs/TODO-production-readiness.md) | What stands between the current STE deployment and production, prioritised, with a dependency map |
+| [`docs/pipeline/initial-implementation/plan.md`](docs/pipeline/initial-implementation/plan.md) | Design decisions, rationale, corrections, and open items |
+
+The Deployment section below is the summary; `docs/DEPLOYMENT.md` is the operational detail.
 
 ## Branch strategy
 

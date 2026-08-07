@@ -179,6 +179,38 @@ Only `PCR_SERVICE_INGESTION_ENDPOINT` is required. Also
 Not done: no deployment, and no test against a **real** Azure Event Grid subscription or a live PCR
 service — see open items 1 and 2a. CI has not run yet (no remote).
 
+## 5a. Verified in STE — 7 Aug 2026
+
+Deployed to `fa-ste-ccp0121-pcrrelay` and exercised with a synthetic event posted to
+`/runtime/webhooks/eventgrid`.
+
+| Hop | Result |
+|---|---|
+| App loads on Java 25, function registered | ✅ |
+| Topic → `egs-pcr-relay` → function | ✅ (verified by publishing to the topic) |
+| Parse, `hearingId` extraction | ✅ |
+| **TLS to the PCR ingress** | ✅ — VNet integration + CA bundle + `PCR_SERVICE_CA_BUNDLE_PATH` |
+| Retry / backoff / propagate | ✅ 3 attempts, then 500 so Event Grid redelivers |
+| PCR returns success | ❌ answers **500** |
+
+Three separate causes had to be fixed to get TLS working, and the first two looked identical in the
+logs (`I/O failure … : null`):
+
+1. **No VNet integration** — the app could not route to the internal ingress. The siblings are attached
+   to `sn-ste-ccp0121-courtreg`; ours was not.
+2. **No private-CA trust** — the ingress certificate is issued by a CA no JVM ships. Fixed by
+   `AdditiveTrust` plus shipping the bundle in the package.
+3. **`PCR_SERVICE_CA_BUNDLE_PATH` unset** — the trust code was inert without it, and `config-zip` does
+   not apply the `azurefunctions` appSettings block, so it had to be set explicitly.
+
+**Deploy mechanism correction.** `config-zip` cannot deploy this app: `azureFunctionsDeploy` sets
+`WEBSITE_RUN_FROM_PACKAGE` to a blob SAS URL, and once it holds a URL Kudu ZipDeploy 409s permanently.
+The app therefore diverges from its seven siblings, which use `WEBSITE_RUN_FROM_PACKAGE=1`.
+
+The remaining 500 is the PCR service's. Notably it is not the `503` its contract documents for
+"hearing details not complete yet", so it is erroring on an unknown hearing rather than taking its
+documented not-ready path — a question for that service, not this relay.
+
 ## 6. Open items
 
 | # | Item | Owner | Blocking? |
@@ -194,6 +226,7 @@ service — see open items 1 and 2a. CI has not run yet (no remote).
 | 5 | **There is nothing to repoint — ADR-007's premise is wrong.** That design says the `pcr-hearing-results` subscription is "already provisioned, confirmed by the platform team". It is **not** on `eg-ste-ccp0121-hearingres`: 13 subscriptions exist and none is it, so nothing currently delivers to the PCR service's webhook. `egs-pcr-relay` would be the first delivery path, which makes `HearingResultedWebhookController` / `HearingResultedWebhookService` dead code rather than something to migrate off. Worth correcting in the PCR repo. The legacy chain's own subscription is untouched either way (§2a) | This team + platform | No |
 | 6 | ~~**Repo name.**~~ **Resolved 4 Aug 2026** — renamed from `cpp-context-azure-prisoncourtregister` to `pcr-eventgrid-relay-function`; `artifactId` → `pcr-eventgrid-relay-function`, and with the Gradle move (decision 8) `group` → `uk.gov.hmcts.cp` to match the PCR service. The Java package stays `uk.gov.moj.cpp.prisoncourtregister` — PCR *is* Prison Court Register, so it remains accurate, and `@FunctionName` is a deployed identity not worth churning | — | Done |
 | 7 | **No GitHub remote / no commit.** Needs an initial commit and an `hmcts/pcr-eventgrid-relay-function` repo. Note CI is GitHub Actions now, so there is no SonarQube project to register — `code-analysis.yml` runs PMD and `codeql.yml` runs CodeQL instead | This team | No |
+| 7a | **Fetch the CA bundle from infrastructure in CI, and stop committing it.** The PCR internal ingress uses a private CA no JVM ships; the bundle was committed for a period, which is why the repo was made private, and it remains in git history. Target: CI authenticates with the same Entra federated credential the `Deploy` job needs, pulls the bundle from Key Vault, and drops it in before `azureFunctionsPackageZip`. The build and CI plumbing is now **done**: `CA_BUNDLE_SOURCE` selects the source, the `Materialise the internal CA bundle` CI step writes the `PCR_INTERNAL_CA_BUNDLE` secret to `RUNNER_TEMP` and exports it, and a set-but-unusable path fails the build instead of falling back. The committed copy is now **deleted** and git-ignored (local builds read `.local/internal_ca_certs.pem`). Remaining: set the secret — until then CI packages no bundle, so deploy from a local build — and rewrite history before the repo could go public. Swapping the GitHub secret for Key Vault changes only that one step. Buys: repo can go public again, CA rotation becomes an infra change not a code commit, no certificate material in git history. Needs a source of truth (Key Vault secret vs GitHub secret — platform team's call) and `get` access for CI. See README "Internal CA trust" | Platform + this team | No, but it unblocks going public |
 | 8 | **ADR needed.** This partially reverses ADR-007's direct-webhook decision; worth its own ADR in the PCR repo so the reasoning is not only in this repo's README | This team | No |
 
 ## 7. Trade-off: does this undo ADR-007?
