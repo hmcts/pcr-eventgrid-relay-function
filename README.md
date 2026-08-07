@@ -573,6 +573,16 @@ CI uses OIDC federated credentials rather than `az login`; `-DARTEFACT_VERSION=`
   automation, and no IaC for them was found. Prefer having the platform team create the app rather than
   running `functionapp create` by hand, so it does not drift from whatever produces the rest.
 
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Step-by-step runbook for non-local environments — required permissions, per-environment settings, provisioning, VNet integration, deploy, Event Grid wiring, smoke testing, rollback, and every failure mode hit for real |
+| [`docs/TODO-production-readiness.md`](docs/TODO-production-readiness.md) | What stands between the current STE deployment and production, prioritised, with a dependency map |
+| [`docs/pipeline/initial-implementation/plan.md`](docs/pipeline/initial-implementation/plan.md) | Design decisions, rationale, corrections, and open items |
+
+The Deployment section below is the summary; `docs/DEPLOYMENT.md` is the operational detail.
+
 ## Branch strategy
 
 Trunk-based on `main`, matching `service-cp-crime-results-pcr` — **not** the JGitFlow model the CPP
