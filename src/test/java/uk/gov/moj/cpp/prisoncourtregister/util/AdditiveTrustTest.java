@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -30,8 +31,9 @@ class AdditiveTrustTest {
     @BeforeAll
     static void generateThrowawayCa() throws Exception {
         caPem = tempDir.resolve("throwaway-ca.pem");
+        final String opensslExecutable = resolveOpenSslExecutable();
         final Process openssl = new ProcessBuilder(
-                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                opensslExecutable, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                 "-keyout", tempDir.resolve("throwaway-ca.key").toString(),
                 "-out", caPem.toString(),
                 "-days", "1", "-subj", "/CN=throwaway-test-ca")
@@ -44,6 +46,18 @@ class AdditiveTrustTest {
         assertThat(platformAnchors)
                 .as("the JVM must ship default trust anchors, or the additive assertion proves nothing")
                 .isPositive();
+    }
+
+    private static String resolveOpenSslExecutable() {
+        final List<String> candidates = List.of(
+                "/usr/bin/openssl",
+                "/bin/openssl",
+                "/usr/local/bin/openssl");
+
+        return candidates.stream()
+                .filter(path -> Files.isExecutable(Path.of(path)))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("No absolute openssl executable found in known locations"));
     }
 
     @Test
