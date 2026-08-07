@@ -56,12 +56,17 @@ TLS handshake — as a bare `IOException`, not an HTTP status. `AdditiveTrust` a
 from `PCR_SERVICE_CA_BUNDLE_PATH`, adding those CAs to the platform defaults (never replacing them).
 `NODE_EXTRA_CA_CERTS`, which the Node siblings use, has no JVM equivalent.
 
-**The committed bundle is a stopgap, and the repo is private only to permit it.**
-`stageInternalCaBundle` takes the bundle from `CA_BUNDLE_SOURCE` when that is set — which is what CI
-does, materialising it from the `PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — and falls back to
-the committed copy only for local builds. A set-but-missing or non-PEM `CA_BUNDLE_SOURCE` **fails the
-build** rather than falling back, so CI can never silently ship a certificate infrastructure did not
-supply. What remains is setting that secret and deleting the committed copy; neither is a code change.
+**No certificate material is tracked in this repo.** `stageInternalCaBundle` takes the bundle from
+`CA_BUNDLE_SOURCE` when set — which is what CI does, materialising it from the
+`PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — and otherwise from `.local/internal_ca_certs.pem`,
+which is git-ignored and exists only on a developer machine. A set-but-missing or non-PEM
+`CA_BUNDLE_SOURCE` **fails the build** rather than falling back, so CI can never silently ship a
+certificate infrastructure did not supply. With neither source the build warns and packages nothing,
+which is correct locally but would break a deployment.
+
+The bundle *was* committed for a period, so it is still in git history: the repo stays **private**
+until that history is rewritten (TODO 4.1). Do not re-add a PEM to the working tree — `.gitignore`
+blocks `.local/` and the bare filename at any path on purpose.
 Full rationale, rejected alternatives and prerequisites are in README.md under "Internal CA trust".
 
 Do not "simplify" any of this without reading that section:

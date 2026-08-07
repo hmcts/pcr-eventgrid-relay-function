@@ -16,7 +16,7 @@ Every command here has been run for real against **STE-CCP0121**, and every fail
 | JDK | **25** — the Gradle toolchain pins it; an older JDK fails with "invalid target release: 25" |
 | Docker | Only for `./gradlew build`'s integration tests. Not needed to package or deploy |
 | Azure RBAC | See §1.1 — more than Website Contributor |
-| CA bundle | `internal_ca_certs.pem` in the repo root, **or** `CA_BUNDLE_SOURCE` pointing at a bundle fetched from infrastructure (see §4.4) |
+| CA bundle | Not in the repo — no certificate material is tracked. Place it at `.local/internal_ca_certs.pem` (git-ignored), **or** set `CA_BUNDLE_SOURCE`. See §4.4 |
 
 ### 1.1 Required permissions
 
@@ -168,10 +168,14 @@ CA_BUNDLE_SOURCE=/path/to/internal_ca_certs.pem ./gradlew azureFunctionsPackageZ
 #   -> "Staging CA bundle from CA_BUNDLE_SOURCE: /path/to/internal_ca_certs.pem"
 #   A path that does not exist, or a file with no BEGIN CERTIFICATE block, FAILS the build.
 
-# From the repo copy — the local fallback when CA_BUNDLE_SOURCE is unset.
+# From the git-ignored local directory — the fallback when CA_BUNDLE_SOURCE is unset.
 ./gradlew azureFunctionsPackageZip
-#   -> "Staging CA bundle from the repo copy (CA_BUNDLE_SOURCE not set)"
+#   -> "Staging CA bundle from .local/internal_ca_certs.pem (CA_BUNDLE_SOURCE not set)"
 ```
+
+**A fresh clone has no bundle**, because none is committed. Get the current one from the platform team
+(or from a colleague who has deployed) and put it at `.local/internal_ca_certs.pem` before deploying.
+Never commit it — `.gitignore` blocks it, deliberately.
 
 `verifyStagedApp` then fails the build if a bundle was available but did not reach the package, so a
 zip that would deploy and fail every relay at the TLS handshake cannot be produced silently.

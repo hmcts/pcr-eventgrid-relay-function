@@ -145,12 +145,14 @@ tasks.register('pruneWorkerProvidedJars') {
 //   CA_BUNDLE_SOURCE set  ->  that path, and it MUST exist. CI fetches the bundle from
 //                             infrastructure, writes it outside the repo tree, and points this at
 //                             it. Missing or not a PEM fails the build.
-//   CA_BUNDLE_SOURCE unset -> the copy committed in the repo root, for local builds.
+//   CA_BUNDLE_SOURCE unset -> .local/internal_ca_certs.pem, which is git-ignored and never
+//                             committed. Present only on a developer machine.
 //
-// Failing hard when CA_BUNDLE_SOURCE is set but unusable is the whole point of the split: a CI run
-// that silently fell back to the committed copy would package a certificate nobody had reviewed, and
-// one that packaged nothing at all would deploy an app that fails every relay at the TLS handshake
-// with no build-time signal. Local builds keep the convenient fallback; CI gets no fallback.
+// No certificate material is tracked in this repository. Failing hard when CA_BUNDLE_SOURCE is set
+// but unusable is the point of the split: a CI run that silently fell back would package a
+// certificate nobody had reviewed, and one that packaged nothing would deploy an app that fails
+// every relay at the TLS handshake with no build-time signal. Local builds keep a convenient
+// fallback; CI gets none.
 //
 // Accepts a system property or an environment variable, so both `-DCA_BUNDLE_SOURCE=...` and an
 // exported env var work — GitHub Actions sets the latter via GITHUB_ENV.
@@ -164,14 +166,17 @@ if (caBundleSourceSetting) {
           : layout.projectDirectory.file(caBundleSourceSetting).asFile
 }
 
-def caBundleFromRepo = layout.projectDirectory.file('internal_ca_certs.pem').asFile
+// Git-ignored (see .gitignore) — a developer places the bundle here by hand. Deliberately not the
+// repo root, where it used to be committed.
+def localCaBundlePath = '.local/internal_ca_certs.pem'
+def caBundleFromLocalDir = layout.projectDirectory.file(localCaBundlePath).asFile
 
 // The staged filename is fixed regardless of what the source file is called, because the
 // PCR_SERVICE_CA_BUNDLE_PATH app setting names this exact path inside wwwroot.
 def stagedCaBundleName = 'internal_ca_certs.pem'
 
 // Used by verifyStagedApp: if a bundle was available, the package must actually contain it.
-def caBundleExpected = caBundleFromInfra != null || caBundleFromRepo.isFile()
+def caBundleExpected = caBundleFromInfra != null || caBundleFromLocalDir.isFile()
 
 // Deliberately NOT a Copy task, and this is load-bearing. A Copy's `into` directory becomes a
 // declared task output, and azureFunctionsPackage already declares that same directory as *its*
@@ -203,14 +208,16 @@ tasks.register('stageInternalCaBundle') {
       }
       source = caBundleFromInfra
       logger.lifecycle("Staging CA bundle from CA_BUNDLE_SOURCE: ${source}")
-    } else if (caBundleFromRepo.isFile()) {
-      source = caBundleFromRepo
-      logger.lifecycle("Staging CA bundle from the repo copy (CA_BUNDLE_SOURCE not set): "
-              + "${source.name}")
+    } else if (caBundleFromLocalDir.isFile()) {
+      source = caBundleFromLocalDir
+      logger.lifecycle("Staging CA bundle from ${localCaBundlePath} (CA_BUNDLE_SOURCE not set)")
     } else {
-      logger.warn("No internal CA bundle: CA_BUNDLE_SOURCE is unset and ${caBundleFromRepo.name} is "
-              + "absent. The deployed app will not trust the PCR ingress private CA and every relay "
-              + "will fail at the TLS handshake.")
+      logger.warn("No internal CA bundle: CA_BUNDLE_SOURCE is unset and ${localCaBundlePath} is "
+              + "absent, so the package will not trust the PCR ingress private CA and every relay "
+              + "would fail at the TLS handshake.\n"
+              + "  Fine for local development and the integration tests, which use plain HTTP.\n"
+              + "  Before deploying, either place the bundle at ${localCaBundlePath} (git-ignored) "
+              + "or set CA_BUNDLE_SOURCE.")
       return
     }
 

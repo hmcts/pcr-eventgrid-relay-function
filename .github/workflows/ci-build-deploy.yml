@@ -106,8 +106,8 @@ jobs:
       - name: Pre-pull the Azure Functions image
         run: docker pull mcr.microsoft.com/azure-functions/java:4-java25
 
-      # The bundle that SHIPS should come from infrastructure, not from the copy committed to this
-      # repo — that copy exists only so local builds work, and TODO 4.1 tracks deleting it.
+      # No certificate material is tracked in this repository, so the bundle can only come from
+      # infrastructure. Without this secret the packaged app has no CA bundle at all.
       #
       # Written to RUNNER_TEMP, deliberately outside the workspace: a PEM materialised inside the repo
       # tree can be committed by accident and trips the secret scanners. CA_BUNDLE_SOURCE is exported
@@ -118,8 +118,9 @@ jobs:
           CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
         run: |
           if [ -z "$CA_BUNDLE" ]; then
-            echo "::warning::PCR_INTERNAL_CA_BUNDLE is not set - the build will fall back to the copy committed in the repo."
-            echo "::warning::Set the secret to ship the bundle from infrastructure instead. See docs/TODO-production-readiness.md 4.1."
+            echo "::warning::PCR_INTERNAL_CA_BUNDLE is not set - this build will package no CA bundle."
+            echo "::warning::The artefact is still valid, but a deployed app would fail every relay at the TLS handshake."
+            echo "::warning::See docs/TODO-production-readiness.md 4.1."
             exit 0
           fi
 
@@ -209,16 +210,18 @@ jobs:
           # Mirrors verifyStagedApp, at the zip rather than the staging directory: if a bundle was
           # available at build time it must actually be in the artefact. A zip without it deploys
           # fine and then fails every relay at the TLS handshake.
-          if [ -n "${CA_BUNDLE_SOURCE:-}" ] || [ -f internal_ca_certs.pem ]; then
+          if [ -n "${CA_BUNDLE_SOURCE:-}" ]; then
             unzip -l "$ZIP" | grep -q 'internal_ca_certs.pem' \
-              || { echo "::error::a CA bundle was available at build time but is not in the zip"; exit 1; }
-            if [ -n "${CA_BUNDLE_SOURCE:-}" ]; then
-              echo "CA bundle present in the zip (from infrastructure)."
-            else
-              echo "::warning::CA bundle present in the zip, but from the copy committed in the repo, not infrastructure."
-            fi
+              || { echo "::error::CA_BUNDLE_SOURCE was set but the bundle is not in the zip"; exit 1; }
+            echo "CA bundle present in the zip, from infrastructure."
           else
-            echo "::warning::no CA bundle was available - the deployed app cannot complete TLS to the PCR ingress."
+            # No certificate material is tracked in this repo, so with the secret unset there is
+            # nothing for CI to package. The zip is fine for review and for the Deploy job to
+            # publish, but the running app cannot complete TLS to the PCR ingress until the bundle
+            # is supplied.
+            echo "::warning::No CA bundle in this artefact - PCR_INTERNAL_CA_BUNDLE is not set."
+            echo "::warning::Deploying this zip gives an app that fails every relay at the TLS handshake."
+            echo "::warning::See docs/TODO-production-readiness.md 4.1."
           fi
 
           echo "Zip verified: eventGridTrigger binding present, no worker-provided jars."

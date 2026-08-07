@@ -213,7 +213,7 @@ Two non-options, recorded so they are not retried:
 | `CA_BUNDLE_SOURCE` | Source used | If it is missing or not a PEM |
 |---|---|---|
 | set (CI) | that path | **build fails** |
-| unset (local) | the copy committed in the repo root | warns, packages without it |
+| unset (local) | `.local/internal_ca_certs.pem` (git-ignored) | warns, packages without it |
 
 CI materialises the bundle from the `PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — outside the
 workspace, so it cannot be committed by accident — and exports `CA_BUNDLE_SOURCE`. The staged filename
@@ -227,21 +227,26 @@ infrastructure was *supposed* to supply one would ship something nobody reviewed
 string, so the build also rejects a file containing no `BEGIN CERTIFICATE` block, and both
 `verifyStagedApp` and the CI zip check assert the bundle actually reached the artefact.
 
-The committed copy is a stopgap, and it is only acceptable because **the repository is
-private**. It was public initially, and the
-certificates were deliberately kept out of it: they carry internal domain names, and the PCR design
-doc redacts the equivalent hostname as "not for a public repo". Going private was a decision taken
-specifically to allow this, and it has costs — code scanning on private repos needs GitHub Advanced
-Security, and Actions minutes bill against the org quota.
+### The repository no longer tracks any certificate
 
-Three further drawbacks worth naming:
+No certificate material is checked in. `.gitignore` excludes `.local/` and the bare filename
+`internal_ca_certs.pem` at any path, the latter specifically so the bundle cannot drift back to the
+repo root where it used to live.
 
-- **CA rotation becomes a code change.** Renewing or adding a CA means a commit, a PR and a release,
-  rather than an infrastructure update.
-- **The certificates are in git history permanently.** Even if removed later, they remain in every
-  clone and in the history of any fork.
-- **It couples repo visibility to a certificate.** The repo cannot go public again without first
-  removing the bundle *and* rewriting history.
+**This does not undo the past.** The bundle *was* committed for a period, so it remains in git history
+and in every existing clone and fork. Two consequences:
+
+- **The repo must stay private for now.** It was public initially, and the certificates were
+  deliberately kept out of it: they carry internal domain names, and the PCR design doc redacts the
+  equivalent hostname as "not for a public repo". Going private was a decision taken specifically to
+  allow committing the bundle, and it has costs — code scanning on private repos needs GitHub Advanced
+  Security, and Actions minutes bill against the org quota. Returning to public needs a **history
+  rewrite**, tracked in TODO 4.1.
+- **Treat those CAs as exposed to anyone who has ever cloned the repo.** If that is not acceptable,
+  the CAs need rotating rather than merely un-committing.
+
+Until the `PCR_INTERNAL_CA_BUNDLE` secret is set, **CA rotation is still a manual step** for whoever
+deploys — they need the current bundle at `.local/internal_ca_certs.pem`.
 
 ### What is left to do
 
@@ -260,11 +265,11 @@ ci-build-deploy.yml
 
 Two things remain, and neither is a code change:
 
-- **Set `PCR_INTERNAL_CA_BUNDLE`** as a repo or environment secret. Until then CI logs a warning and
-  falls back to the committed copy, so builds stay green but still ship the in-repo certificate.
-- **Delete the committed `internal_ca_certs.pem`** once the secret is in place. After that, a local
-  build simply warns and packages without a bundle, which is correct: local runs do not talk to the
-  real ingress.
+- **Set `PCR_INTERNAL_CA_BUNDLE`** as a repo or environment secret. Until then CI warns and packages
+  **no bundle at all** — the artefact is valid and the build is green, but deploying it gives an app
+  that fails every relay at the TLS handshake. Until it is set, deploy from a local build that has
+  `.local/internal_ca_certs.pem` in place.
+- **Rewrite history** to remove the previously-committed bundle, if the repo is to go public again.
 
 If the bundle would rather live in Key Vault than a GitHub secret, only step 1 changes — swap the
 secret for `azure/login` plus `az keyvault secret download`, writing to the same path and exporting

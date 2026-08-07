@@ -20,6 +20,16 @@ local.settings.json
 bin/
 obj/
 
+# Local-only material, never committed. `.local/internal_ca_certs.pem` is where a local build looks
+# for the PCR ingress private-CA bundle; CI takes it from infrastructure instead via
+# CA_BUNDLE_SOURCE. See README "Internal CA trust".
+#
+# The bare filename is ignored as well as the directory, deliberately: the bundle used to be
+# committed at the repo root, and this stops it being re-added there by habit or by `git add -A`.
+.local/
+internal_ca_certs.pem
+**/internal_ca_certs.pem
+
 # Mac
 .DS_Store
 **/.DS_Store

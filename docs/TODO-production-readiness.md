@@ -145,20 +145,20 @@ synthetic one, so the test would only re-observe the Redis error and prove nothi
 
 ## 4. Security and supply chain
 
-### 4.1 CA bundle is still committed — P2, build side now done
-`internal_ca_certs.pem` is in the repo, which is why the repo is private. Consequences: CA rotation is
-a code change, the certificates are in git history permanently, and repo visibility is coupled to a
-certificate.
+### 4.1 CA bundle is out of the working tree, still in history — P2
+The bundle is **no longer tracked**: `.gitignore` excludes `.local/` and the bare filename at any path,
+local builds read `.local/internal_ca_certs.pem`, and CI reads `CA_BUNDLE_SOURCE`. A set-but-unusable
+path fails the build rather than falling back.
 
-The build and CI plumbing to take the bundle from infrastructure instead is **in place**:
-`CA_BUNDLE_SOURCE` selects the source, CI materialises it from the `PCR_INTERNAL_CA_BUNDLE` secret into
-`RUNNER_TEMP`, and a set-but-unusable path fails the build rather than falling back. What remains is
-configuration and cleanup:
+Two things are still open, and the first is now the more urgent because **CI currently packages no
+bundle at all** — a green build whose artefact cannot complete TLS:
 
-- [ ] Set the `PCR_INTERNAL_CA_BUNDLE` secret (plain PEM or base64). Until then CI warns and ships the
-      committed copy
-- [ ] Delete the committed `internal_ca_certs.pem`
-- [ ] Decide whether history needs rewriting before the repo could return to public
+- [ ] Set the `PCR_INTERNAL_CA_BUNDLE` secret (plain PEM or base64). Until then, deploy only from a
+      local build that has `.local/internal_ca_certs.pem` in place, or the app fails every relay at the
+      TLS handshake
+- [ ] Rewrite history to remove the previously-committed bundle, before the repo could return to
+      public. Until then it stays private, and those CAs should be treated as exposed to anyone who has
+      cloned it — if that is not acceptable, rotate them rather than merely un-committing
 
 Optional: move the bundle to Key Vault rather than a GitHub secret — only the one CI step changes
 (`azure/login` + `az keyvault secret download` writing to the same path), which needs the same
