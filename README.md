@@ -204,13 +204,31 @@ Two non-options, recorded so they are not retried:
 | `WEBSITE_LOAD_CERTIFICATES` | On Linux this exposes certificates as individual **DER** files under `/var/ssl/certs`. `AdditiveTrust` takes a single PEM bundle path and cannot consume a directory of DERs without further change |
 | Importing into the JVM's `cacerts` | Requires a startup command mutating the JDK inside a managed Functions host. Fragile, and invisible to anyone reading the app config |
 
-### How it is addressed today — and why this is a stopgap
+### How it is addressed — two sources, one staged path
 
-The bundle is **committed to this repository** and staged into the deployment package by the
-`stageInternalCaBundle` Gradle task, landing at `/home/site/wwwroot/internal_ca_certs.pem` — the same
-path and filename the siblings use. `PCR_SERVICE_CA_BUNDLE_PATH` points at it.
+`stageInternalCaBundle` stages the bundle into the deployment package at
+`/home/site/wwwroot/internal_ca_certs.pem` — the same path and filename the siblings use, and what
+`PCR_SERVICE_CA_BUNDLE_PATH` points at. Where the bundle comes *from* depends on `CA_BUNDLE_SOURCE`:
 
-This is only acceptable because **the repository is private**. It was public initially, and the
+| `CA_BUNDLE_SOURCE` | Source used | If it is missing or not a PEM |
+|---|---|---|
+| set (CI) | that path | **build fails** |
+| unset (local) | the copy committed in the repo root | warns, packages without it |
+
+CI materialises the bundle from the `PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — outside the
+workspace, so it cannot be committed by accident — and exports `CA_BUNDLE_SOURCE`. The staged filename
+is always `internal_ca_certs.pem` whatever the source file is called, because the app setting names
+that exact path.
+
+The asymmetry is deliberate. Locally a missing bundle is an inconvenience, and the integration tests
+use plain HTTP so they do not need one. In CI, silently falling back to a committed certificate when
+infrastructure was *supposed* to supply one would ship something nobody reviewed — so a set-but-broken
+`CA_BUNDLE_SOURCE` fails the build rather than degrading. An unset GitHub secret expands to an empty
+string, so the build also rejects a file containing no `BEGIN CERTIFICATE` block, and both
+`verifyStagedApp` and the CI zip check assert the bundle actually reached the artefact.
+
+The committed copy is a stopgap, and it is only acceptable because **the repository is
+private**. It was public initially, and the
 certificates were deliberately kept out of it: they carry internal domain names, and the PCR design
 doc redacts the equivalent hostname as "not for a public repo". Going private was a decision taken
 specifically to allow this, and it has costs — code scanning on private repos needs GitHub Advanced
@@ -225,25 +243,35 @@ Three further drawbacks worth naming:
 - **It couples repo visibility to a certificate.** The repo cannot go public again without first
   removing the bundle *and* rewriting history.
 
-### Where we want to get to — fetch from infrastructure in CI
+### What is left to do
 
-The intended end state is that **the repository carries no certificates at all**, and CI fetches the
-bundle from infrastructure while building the zip:
+The build and CI wiring for an infrastructure-supplied bundle is **in place**:
 
 ```
 ci-build-deploy.yml
   └─ Build job
-       1. azure/login  (OIDC — the federated credential the Deploy job already needs)
-       2. az keyvault secret download  →  internal_ca_certs.pem  into the project directory
-       3. ./gradlew azureFunctionsPackageZip     ← stageInternalCaBundle picks it up unchanged
-       4. verify the zip contains the bundle
+       1. Materialise the internal CA bundle   →  $RUNNER_TEMP/internal_ca_certs.pem
+          (from the PCR_INTERNAL_CA_BUNDLE secret; base64 or plain PEM)
+          exports CA_BUNDLE_SOURCE
+       2. ./gradlew build                      ← stageInternalCaBundle reads CA_BUNDLE_SOURCE
+       3. ./gradlew azureFunctionsPackageZip
+       4. Verify packaged zip                  ← asserts the bundle is in the artefact
 ```
 
-`stageInternalCaBundle` already works this way — it copies whatever `internal_ca_certs.pem` is present
-at build time and warns loudly when it is absent, so **no build-script change is needed**. The only
-changes are the CI step that materialises the file, and deleting the committed copy.
+Two things remain, and neither is a code change:
 
-What that buys:
+- **Set `PCR_INTERNAL_CA_BUNDLE`** as a repo or environment secret. Until then CI logs a warning and
+  falls back to the committed copy, so builds stay green but still ship the in-repo certificate.
+- **Delete the committed `internal_ca_certs.pem`** once the secret is in place. After that, a local
+  build simply warns and packages without a bundle, which is correct: local runs do not talk to the
+  real ingress.
+
+If the bundle would rather live in Key Vault than a GitHub secret, only step 1 changes — swap the
+secret for `azure/login` plus `az keyvault secret download`, writing to the same path and exporting
+the same variable. Nothing downstream cares where the file came from. Note this needs the same
+federated credential as TODO 1.3.
+
+What finishing this buys:
 
 - the repo can go **public again**, matching the rest of the estate;
 - **CA rotation is an infrastructure change** — update the Key Vault secret, redeploy, no code commit;

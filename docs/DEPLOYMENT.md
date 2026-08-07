@@ -16,7 +16,7 @@ Every command here has been run for real against **STE-CCP0121**, and every fail
 | JDK | **25** — the Gradle toolchain pins it; an older JDK fails with "invalid target release: 25" |
 | Docker | Only for `./gradlew build`'s integration tests. Not needed to package or deploy |
 | Azure RBAC | See §1.1 — more than Website Contributor |
-| CA bundle | `internal_ca_certs.pem` must be present in the repo root (see §4) |
+| CA bundle | `internal_ca_certs.pem` in the repo root, **or** `CA_BUNDLE_SOURCE` pointing at a bundle fetched from infrastructure (see §4.4) |
 
 ### 1.1 Required permissions
 
@@ -160,13 +160,32 @@ setup.
 
 ### 4.4 Confirm the CA bundle is present
 
+The bundle can come from either of two places, and the build tells you which it used:
+
 ```bash
-ls -l internal_ca_certs.pem     # must exist in the repo root before packaging
+# From infrastructure — what CI does, and what a release build should do.
+CA_BUNDLE_SOURCE=/path/to/internal_ca_certs.pem ./gradlew azureFunctionsPackageZip
+#   -> "Staging CA bundle from CA_BUNDLE_SOURCE: /path/to/internal_ca_certs.pem"
+#   A path that does not exist, or a file with no BEGIN CERTIFICATE block, FAILS the build.
+
+# From the repo copy — the local fallback when CA_BUNDLE_SOURCE is unset.
+./gradlew azureFunctionsPackageZip
+#   -> "Staging CA bundle from the repo copy (CA_BUNDLE_SOURCE not set)"
 ```
 
-If absent, the build **succeeds with a warning** and produces a package that cannot talk to PCR. That
-is intentional so the future CI-fetch migration can land, but it means a missing bundle is easy to
-overlook. See `README` → *Internal CA trust*.
+`verifyStagedApp` then fails the build if a bundle was available but did not reach the package, so a
+zip that would deploy and fail every relay at the TLS handshake cannot be produced silently.
+
+Confirm the bundle reached the artefact, rather than trusting the build log:
+
+```bash
+unzip -l build/azure-functions/*.zip | grep internal_ca_certs.pem
+```
+
+With **neither** source available the build succeeds with a warning and produces a package that cannot
+talk to PCR. That is deliberate — local builds and the integration tests do not need a bundle — but it
+means a missing one is easy to overlook, so check the zip before deploying. See `README` →
+*Internal CA trust*.
 
 ---
 

@@ -25,6 +25,13 @@ on:
         required: false
       GITLEAKS_LICENSE:
         required: false
+      PCR_INTERNAL_CA_BUNDLE:
+        required: false
+        description: >-
+          PEM bundle for the PCR ingress private CA chain, held in infrastructure rather than in this
+          repo. When set, the Build job writes it outside the repo tree and points CA_BUNDLE_SOURCE
+          at it, so that is what ships in the zip. When unset, the build falls back to the copy
+          committed in the repo root and warns. See docs/TODO-production-readiness.md 4.1.
     inputs:
       environment:
         required: true
@@ -99,6 +106,43 @@ jobs:
       - name: Pre-pull the Azure Functions image
         run: docker pull mcr.microsoft.com/azure-functions/java:4-java25
 
+      # The bundle that SHIPS should come from infrastructure, not from the copy committed to this
+      # repo — that copy exists only so local builds work, and TODO 4.1 tracks deleting it.
+      #
+      # Written to RUNNER_TEMP, deliberately outside the workspace: a PEM materialised inside the repo
+      # tree can be committed by accident and trips the secret scanners. CA_BUNDLE_SOURCE is exported
+      # via GITHUB_ENV so both the `build` and the packaging step below pick it up; build.gradle fails
+      # the build if it points at nothing or at a file with no certificate in it.
+      - name: Materialise the internal CA bundle from infrastructure
+        env:
+          CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
+        run: |
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "::warning::PCR_INTERNAL_CA_BUNDLE is not set - the build will fall back to the copy committed in the repo."
+            echo "::warning::Set the secret to ship the bundle from infrastructure instead. See docs/TODO-production-readiness.md 4.1."
+            exit 0
+          fi
+
+          DEST="$RUNNER_TEMP/internal_ca_certs.pem"
+          printf '%s\n' "$CA_BUNDLE" > "$DEST"
+
+          # Tolerate a base64-encoded secret, which is how a PEM is often stored to survive
+          # copy-paste and single-line secret fields.
+          if ! grep -q 'BEGIN CERTIFICATE' "$DEST"; then
+            if base64 -d < "$DEST" > "$DEST.decoded" 2>/dev/null && grep -q 'BEGIN CERTIFICATE' "$DEST.decoded"; then
+              mv "$DEST.decoded" "$DEST"
+              echo "Secret was base64-encoded; decoded it."
+            else
+              rm -f "$DEST.decoded"
+              echo "::error::PCR_INTERNAL_CA_BUNDLE is set but is neither a PEM nor base64-encoded PEM."
+              exit 1
+            fi
+          fi
+
+          chmod 600 "$DEST"
+          echo "CA_BUNDLE_SOURCE=$DEST" >> "$GITHUB_ENV"
+          echo "Staged $(grep -c 'BEGIN CERTIFICATE' "$DEST") certificate(s) for packaging."
+
       - name: Gradle build
         env:
           ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
@@ -161,6 +205,22 @@ jobs:
             echo "::error::pruneWorkerProvidedJars did not run. See build.gradle."
             exit 1
           fi
+
+          # Mirrors verifyStagedApp, at the zip rather than the staging directory: if a bundle was
+          # available at build time it must actually be in the artefact. A zip without it deploys
+          # fine and then fails every relay at the TLS handshake.
+          if [ -n "${CA_BUNDLE_SOURCE:-}" ] || [ -f internal_ca_certs.pem ]; then
+            unzip -l "$ZIP" | grep -q 'internal_ca_certs.pem' \
+              || { echo "::error::a CA bundle was available at build time but is not in the zip"; exit 1; }
+            if [ -n "${CA_BUNDLE_SOURCE:-}" ]; then
+              echo "CA bundle present in the zip (from infrastructure)."
+            else
+              echo "::warning::CA bundle present in the zip, but from the copy committed in the repo, not infrastructure."
+            fi
+          else
+            echo "::warning::no CA bundle was available - the deployed app cannot complete TLS to the PCR ingress."
+          fi
+
           echo "Zip verified: eventGridTrigger binding present, no worker-provided jars."
 
       - name: Upload test results

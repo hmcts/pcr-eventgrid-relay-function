@@ -145,18 +145,24 @@ synthetic one, so the test would only re-observe the Redis error and prove nothi
 
 ## 4. Security and supply chain
 
-### 4.1 CA bundle is committed — P2
+### 4.1 CA bundle is still committed — P2, build side now done
 `internal_ca_certs.pem` is in the repo, which is why the repo is private. Consequences: CA rotation is
 a code change, the certificates are in git history permanently, and repo visibility is coupled to a
 certificate.
 
-- [ ] Move the bundle to Key Vault and have CI fetch it before `azureFunctionsPackageZip`
-- [ ] Delete the committed copy
+The build and CI plumbing to take the bundle from infrastructure instead is **in place**:
+`CA_BUNDLE_SOURCE` selects the source, CI materialises it from the `PCR_INTERNAL_CA_BUNDLE` secret into
+`RUNNER_TEMP`, and a set-but-unusable path fails the build rather than falling back. What remains is
+configuration and cleanup:
+
+- [ ] Set the `PCR_INTERNAL_CA_BUNDLE` secret (plain PEM or base64). Until then CI warns and ships the
+      committed copy
+- [ ] Delete the committed `internal_ca_certs.pem`
 - [ ] Decide whether history needs rewriting before the repo could return to public
 
-`stageInternalCaBundle` already copies whatever bundle is present and warns when absent, so **no
-build-script change is needed** — only a CI step. Needs the same federated credential as 1.3. Open
-item **7a**; full rationale in `README` → *Internal CA trust*.
+Optional: move the bundle to Key Vault rather than a GitHub secret — only the one CI step changes
+(`azure/login` + `az keyvault secret download` writing to the same path), which needs the same
+federated credential as 1.3. Open item **7a**; full rationale in `README` → *Internal CA trust*.
 
 ### 4.2 Secret scanning and push protection are off — P2
 Blocked by an enterprise policy (`HTTP 422 — Contact your enterprise owner`). The reference repo

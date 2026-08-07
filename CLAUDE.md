@@ -56,12 +56,13 @@ TLS handshake — as a bare `IOException`, not an HTTP status. `AdditiveTrust` a
 from `PCR_SERVICE_CA_BUNDLE_PATH`, adding those CAs to the platform defaults (never replacing them).
 `NODE_EXTRA_CA_CERTS`, which the Node siblings use, has no JVM equivalent.
 
-**The committed bundle is a stopgap, and the repo is private only to permit it.** The intended end
-state is CI fetching it from Key Vault at package time so the repo carries no certificates and CA
-rotation stops being a code change. `stageInternalCaBundle` already copies whatever bundle is present
-at build time and warns when absent, so that migration needs **no build-script change** — only a CI
-step and deleting the committed copy. Full rationale, rejected alternatives and prerequisites are in
-README.md under "Internal CA trust".
+**The committed bundle is a stopgap, and the repo is private only to permit it.**
+`stageInternalCaBundle` takes the bundle from `CA_BUNDLE_SOURCE` when that is set — which is what CI
+does, materialising it from the `PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — and falls back to
+the committed copy only for local builds. A set-but-missing or non-PEM `CA_BUNDLE_SOURCE` **fails the
+build** rather than falling back, so CI can never silently ship a certificate infrastructure did not
+supply. What remains is setting that secret and deleting the committed copy; neither is a code change.
+Full rationale, rejected alternatives and prerequisites are in README.md under "Internal CA trust".
 
 Do not "simplify" any of this without reading that section:
 
