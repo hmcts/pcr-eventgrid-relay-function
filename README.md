@@ -177,6 +177,91 @@ repo. Per the PCR design, the existing subscription is `pcr-hearing-results` / e
 `eg-ste-ccp0121-hearingres`; repointing it from the PCR service's webhook to this Function App is a
 platform-team change.
 
+## Internal CA trust — why `internal_ca_certs.pem` is here
+
+### Why it is needed
+
+The PCR service sits behind an **internal ingress** whose TLS certificate is issued by a **private
+CA** that no JVM ships in its default trust store. Without that CA, the relay cannot complete a TLS
+handshake and every event fails — not with a `503` or a `404`, but with a bare I/O error and no HTTP
+response at all.
+
+This is easy to misdiagnose. When first deployed, the relay failed identically *before* and *after*
+VNet integration was added; the logs said only `I/O failure … : null`, because `ConnectException` and
+`SSLHandshakeException` both surface as `IOException` and the latter's message can be empty. It took a
+comparison against the sibling apps' configuration to find the cause. (The logging now names the
+exception type precisely so this is one step, not three.)
+
+The Node sibling apps solve it with `NODE_EXTRA_CA_CERTS`, pointing at a PEM shipped in their
+package. **The JVM has no equivalent** — it will not read a PEM from an environment variable — so the
+trust store has to be assembled in code. `AdditiveTrust` does that, adding the bundle's CAs to the
+platform defaults rather than replacing them.
+
+Two non-options, recorded so they are not retried:
+
+| Rejected | Why |
+|---|---|
+| `WEBSITE_LOAD_CERTIFICATES` | On Linux this exposes certificates as individual **DER** files under `/var/ssl/certs`. `AdditiveTrust` takes a single PEM bundle path and cannot consume a directory of DERs without further change |
+| Importing into the JVM's `cacerts` | Requires a startup command mutating the JDK inside a managed Functions host. Fragile, and invisible to anyone reading the app config |
+
+### How it is addressed today — and why this is a stopgap
+
+The bundle is **committed to this repository** and staged into the deployment package by the
+`stageInternalCaBundle` Gradle task, landing at `/home/site/wwwroot/internal_ca_certs.pem` — the same
+path and filename the siblings use. `PCR_SERVICE_CA_BUNDLE_PATH` points at it.
+
+This is only acceptable because **the repository is private**. It was public initially, and the
+certificates were deliberately kept out of it: they carry internal domain names, and the PCR design
+doc redacts the equivalent hostname as "not for a public repo". Going private was a decision taken
+specifically to allow this, and it has costs — code scanning on private repos needs GitHub Advanced
+Security, and Actions minutes bill against the org quota.
+
+Three further drawbacks worth naming:
+
+- **CA rotation becomes a code change.** Renewing or adding a CA means a commit, a PR and a release,
+  rather than an infrastructure update.
+- **The certificates are in git history permanently.** Even if removed later, they remain in every
+  clone and in the history of any fork.
+- **It couples repo visibility to a certificate.** The repo cannot go public again without first
+  removing the bundle *and* rewriting history.
+
+### Where we want to get to — fetch from infrastructure in CI
+
+The intended end state is that **the repository carries no certificates at all**, and CI fetches the
+bundle from infrastructure while building the zip:
+
+```
+ci-build-deploy.yml
+  └─ Build job
+       1. azure/login  (OIDC — the federated credential the Deploy job already needs)
+       2. az keyvault secret download  →  internal_ca_certs.pem  into the project directory
+       3. ./gradlew azureFunctionsPackageZip     ← stageInternalCaBundle picks it up unchanged
+       4. verify the zip contains the bundle
+```
+
+`stageInternalCaBundle` already works this way — it copies whatever `internal_ca_certs.pem` is present
+at build time and warns loudly when it is absent, so **no build-script change is needed**. The only
+changes are the CI step that materialises the file, and deleting the committed copy.
+
+What that buys:
+
+- the repo can go **public again**, matching the rest of the estate;
+- **CA rotation is an infrastructure change** — update the Key Vault secret, redeploy, no code commit;
+- no certificate material in git history;
+- local development is unaffected: the bundle stays optional, and the integration tests use plain HTTP.
+
+What it needs, and why it is not done yet:
+
+1. **A source of truth** — a Key Vault secret (preferred, rotatable and access-controlled) or a GitHub
+   Actions secret (simpler, but another copy to keep in step). The platform team owns this choice.
+2. **Read access for CI** — the same Entra federated credential the `Deploy` job is waiting on, plus
+   `get` on that secret. Worth requesting together rather than twice.
+3. **Removing the committed bundle**, and deciding whether history needs rewriting before the repo
+   could return to public.
+
+Until (1) and (2) exist, the committed bundle is what makes the relay work at all — so it stays, with
+this section as the record of why it is temporary.
+
 ## Build & test
 
 Gradle, matching [`service-cp-crime-results-pcr`](../service-cp-crime-results-pcr) — same wrapper

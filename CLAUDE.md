@@ -49,6 +49,29 @@ Consequences to respect:
   transform logic (design §5); the legacy app keeps its own copy for the PDF path. The two need
   keeping in step.
 
+## Internal CA trust — `internal_ca_certs.pem`
+
+The PCR internal ingress uses a **private CA** no JVM ships, so without it every relay fails at the
+TLS handshake — as a bare `IOException`, not an HTTP status. `AdditiveTrust` assembles a trust store
+from `PCR_SERVICE_CA_BUNDLE_PATH`, adding those CAs to the platform defaults (never replacing them).
+`NODE_EXTRA_CA_CERTS`, which the Node siblings use, has no JVM equivalent.
+
+**The committed bundle is a stopgap, and the repo is private only to permit it.** The intended end
+state is CI fetching it from Key Vault at package time so the repo carries no certificates and CA
+rotation stops being a code change. `stageInternalCaBundle` already copies whatever bundle is present
+at build time and warns when absent, so that migration needs **no build-script change** — only a CI
+step and deleting the committed copy. Full rationale, rejected alternatives and prerequisites are in
+README.md under "Internal CA trust".
+
+Do not "simplify" any of this without reading that section:
+
+- `WEBSITE_LOAD_CERTIFICATES` is not an alternative — on Linux it yields DER files under
+  `/var/ssl/certs`, not a PEM bundle at one path.
+- Trust must stay **additive**. Trusting only the private CA silently breaks TLS to every public
+  endpoint, and a test asserts the store is `platform defaults + 1`.
+- The build must keep succeeding-with-a-warning when the bundle is missing, so the CI-fetch migration
+  can land without a chicken-and-egg failure.
+
 ## Build & Test Commands
 
 **Gradle**, deliberately mirroring `service-cp-crime-results-pcr`: same wrapper (9.6.1), same Java 25
