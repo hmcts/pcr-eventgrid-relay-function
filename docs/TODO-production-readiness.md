@@ -11,23 +11,37 @@ an inability to deploy; **P2** would make an incident hard to diagnose; **P3** i
 
 ## 1. Blockers
 
-### 1.1 The PCR service returns 500 — P1, not ours to fix
-The only failing hop. A synthetic `hearingId` produces `500` from
-`POST /pcr/internal/hearing-results`, where the contract documents **503** for "hearing details not
-complete yet". So the service is erroring rather than taking its documented not-ready path.
+### 1.1 The PCR service cannot connect to Redis — P1, not ours to fix
+The only failing hop, and now precisely diagnosed. `POST /pcr/internal/hearing-results` returns `500`
+with a structured body:
 
-Until this is understood, nothing downstream of the relay works, and the relay will burn its full retry
-budget on every delivery.
+```json
+{"message":"Unable to connect to Redis",
+ "traceId":"c5f6e6d5c2cba9e70cdc23eda453aecc",
+ "timestamp":"2026-08-07T15:57:42Z"}
+```
 
-- [ ] Check `service-cp-crime-results-pcr` logs for the 500 on an unknown hearing
-- [ ] Confirm whether 503 is reachable at all, since our retry/no-retry split assumes it
-- [ ] Re-test with a **real** `hearingId` present in Redis, which may behave differently
+This also explains why it is a `500` and not the `503` the contract documents for "hearing details not
+complete yet". That 503 path assumes Redis is *reachable* and the entry merely absent; here the
+**connection itself** fails, which `GlobalExceptionHandler` maps to a generic 500. So the documented
+not-ready path was never reached, and nothing about a synthetic `hearingId` is at fault.
 
-**Owner:** PCR service team.
+- [ ] Give the PCR service team that `traceId` — it will appear in their logs
+- [ ] Confirm Redis connectivity from the PCR service in this environment (`RedisInitialise` config,
+      network path, credentials)
+- [ ] Once Redis is reachable, re-run the relay smoke test (`docs/DEPLOYMENT.md` §7.1) and confirm the
+      503 path is reachable — our retry/no-retry split assumes it exists and it has never been observed
+
+**Owner:** PCR service team. Nothing to change in this repo.
+
+Worth noting the relay behaves correctly under this failure: 500 is genuinely transient, so retrying is
+right. But it means every event burns 3 in-process attempts *and* up to 30 Event Grid deliveries over
+24h for as long as Redis is down — which is why 1.2 matters more than it first appeared.
 
 ### 1.2 No dead-letter destination — P1, silent data loss
 Verified: `egs-pcr-relay` has `deadLetterDestination: null`. With 30 attempts over 24h, a permanently
-failing event is **discarded with no record**. Given 1.1, that is not hypothetical.
+failing event is **discarded with no record**. Given 1.1 this is actively happening: every event
+relayed while Redis is down will exhaust its budget and vanish.
 
 The seven siblings also have none, so this is a deliberate deviation to argue for rather than an
 oversight to copy.
@@ -117,9 +131,12 @@ automation this app is not part of.
 - [ ] Otherwise capture app + VNet integration + subscription + dead-letter in Terraform/Bicep
 - [ ] Until then, treat `README` → *Deployment* as the only record of how to recreate it
 
-### 3.4 Never tested against a real hearing — P2
+### 3.4 Never tested against a real hearing — P2, blocked on 1.1
 Every test so far has used a synthetic event injected either at the webhook or at the topic. No real
 `Hearing_Resulted` from `cpp-context-results` has traversed the relay.
+
+**Do this after 1.1, not before.** With Redis unreachable, a real hearing fails identically to a
+synthetic one, so the test would only re-observe the Redis error and prove nothing new about the relay.
 
 - [ ] Drive a real hearing through STE-CCP0121 and confirm the full path
 - [ ] Expect noise: the same event fans out to all seven siblings
@@ -206,7 +223,7 @@ environment as the default.
 ```
 1.3 federated credential ──┬──▶ 1.4 multi-environment deploy
                            └──▶ 4.1 CA bundle from Key Vault ──▶ repo can return to public
-1.1 PCR 500 ──▶ 3.4 real-hearing test ──▶ production readiness
+1.1 PCR Redis connectivity ──▶ 3.4 real-hearing test ──▶ production readiness
 1.2 dead-letter ──▶ 2.2 alerts
 ```
 

@@ -330,7 +330,9 @@ Deployed and verified in STE-CCP0121: app loads on Java 25, function registered,
 works, event parsed, **TLS to the PCR ingress succeeds**, retry/backoff and propagate-on-exhaustion
 behave as designed.
 
-**Outstanding:** the PCR service answers `500` — not the `503` its contract documents for "hearing
-details not complete yet". That is the one remaining failure and belongs to that service.
+**Outstanding:** the PCR service answers `500` with `{"message":"Unable to connect to Redis"}`. That is
+the one remaining failure and belongs to that service — it also explains why the response is a 500
+rather than the `503` its contract documents, since that path assumes Redis is reachable and the entry
+merely absent.
 
 No other environment has a relay deployed. See `docs/TODO-production-readiness.md`.

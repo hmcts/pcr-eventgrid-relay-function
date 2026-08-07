@@ -525,10 +525,10 @@ As of 7 Aug 2026, deployed to `fa-ste-ccp0121-pcrrelay` and exercised by POSTing
 | Retry/backoff and propagate-on-exhaustion | ✅ 3 attempts, then 500 so Event Grid redelivers |
 | PCR service returns success | ❌ — it answers **500** |
 
-The remaining failure is the PCR service's, not this relay's. Note it is a `500`, not the `503` its
-contract documents for "hearing details not complete yet" — so for a synthetic `hearingId` it is
-erroring rather than taking its documented not-ready path. Worth checking against that service's own
-logs before assuming anything about this app.
+The remaining failure is the PCR service's, not this relay's: it answers `500` with
+`{"message":"Unable to connect to Redis"}`. That also explains why it is not the `503` its contract
+documents for "hearing details not complete yet" — that path assumes Redis is reachable and the entry
+merely absent, whereas here the connection itself fails.
 
 Diagnostic value of the log line: `Retryable status 500 from …` means the handshake completed and an
 HTTP round-trip happened. `I/O failure … ConnectException` would mean the request never arrived — the
