@@ -249,17 +249,26 @@ jobs:
   # ==========================================================================================
   # ACTION REQUIRED before this can deploy.
   #
-  # Needs an Entra app registration with a federated credential for this repo, granted
-  # Contributor (or Website Contributor) on the target Function App, and these repo/environment
-  # secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+  # Needs an Entra app registration with a federated credential for this repo (subject
+  # repo:hmcts/pcr-eventgrid-relay-function:environment:dev — matching the "dev" GitHub
+  # Environment this job runs under), granted least-privilege RBAC (Website Contributor on just
+  # this Function App, Storage Account Contributor on just the shared storage account it uploads
+  # run-from-package blobs to — not Contributor over the whole shared resource group, which would
+  # also cover the seven sibling apps), and these repo/environment secrets: AZURE_CLIENT_ID,
+  # AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
   #
   # The job SKIPS cleanly when AZURE_CLIENT_ID is unset, so PRs and pushes stay green before that
   # is provisioned — it does not fail, and it does not silently pretend to have deployed.
   #
-  # The PCR service deploys via ADO pipelines 460/434 (image -> ACR -> Helm/AKS). None of that
-  # applies to a Functions zip, hence Azure/functions-action instead. If the platform team would
-  # rather keep deployment in ADO, replace this job with hmcts/trigger-ado-pipeline against a
-  # Functions-capable pipeline.
+  # Deploys via the Gradle plugin (`azureFunctionsDeploy`), NOT Azure/functions-action or
+  # `az functionapp deployment source config-zip` — this app's WEBSITE_RUN_FROM_PACKAGE is a blob
+  # SAS URL the plugin manages itself (confirmed live: `az functionapp config appsettings list`
+  # shows a sasteccp0121hearingres.blob.core.windows.net SAS URL, not '1'), and a Kudu zip-deploy
+  # against that permanently 409s — see README "Why not config-zip". Rebuilds and repackages from
+  # source rather than reusing the Build job's artifact: `azureFunctionsDeploy` only depends on
+  # compileJava/jar/package (verified via --dry-run — no test/integrationTest, no Docker needed
+  # here), and this way Deploy runs the exact same command the README's manual runbook does,
+  # rather than trusting a zip produced by a different task graph in a different job.
   # ==========================================================================================
   Deploy:
     needs: [Artefact-Version, Build]
@@ -286,12 +295,51 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download Functions zip
+      - name: Checkout source code
         if: steps.creds.outputs.configured == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/checkout@v7
+
+      - name: Set up JDK
+        if: steps.creds.outputs.configured == 'true'
+        uses: actions/setup-java@v5
         with:
-          name: function-app-zip
-          path: dist
+          distribution: 'temurin'
+          java-version: '25'
+
+      - name: Set up Gradle
+        if: steps.creds.outputs.configured == 'true'
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: current
+
+      # Same materialisation as the Build job — Deploy repackages from source rather than reusing
+      # Build's zip, so it needs its own copy of the bundle.
+      - name: Materialise the internal CA bundle from infrastructure
+        if: steps.creds.outputs.configured == 'true'
+        env:
+          CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
+        run: |
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "::warning::PCR_INTERNAL_CA_BUNDLE is not set - deploying with no CA bundle."
+            echo "::warning::The deployed app will fail every relay at the TLS handshake."
+            exit 0
+          fi
+
+          DEST="$RUNNER_TEMP/internal_ca_certs.pem"
+          printf '%s\n' "$CA_BUNDLE" > "$DEST"
+
+          if ! grep -q 'BEGIN CERTIFICATE' "$DEST"; then
+            if base64 -d < "$DEST" > "$DEST.decoded" 2>/dev/null && grep -q 'BEGIN CERTIFICATE' "$DEST.decoded"; then
+              mv "$DEST.decoded" "$DEST"
+            else
+              rm -f "$DEST.decoded"
+              echo "::error::PCR_INTERNAL_CA_BUNDLE is set but is neither a PEM nor base64-encoded PEM."
+              exit 1
+            fi
+          fi
+
+          chmod 600 "$DEST"
+          echo "CA_BUNDLE_SOURCE=$DEST" >> "$GITHUB_ENV"
 
       - name: Azure login (OIDC)
         if: steps.creds.outputs.configured == 'true'
@@ -301,12 +349,34 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # build.gradle's azurefunctions.auth.type = 'azure_cli' picks up the az CLI session
+      # azure/login just established.
       - name: Deploy to Azure Functions
         if: steps.creds.outputs.configured == 'true'
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ inputs.function_app_name }}
-          package: dist/${{ needs.Build.outputs.zip_name }}
+        env:
+          ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
+        run: |
+          ./gradlew azureFunctionsDeploy \
+            -DARTEFACT_VERSION="$ARTEFACT_VERSION" \
+            -DFUNCTION_APP_NAME="${{ inputs.function_app_name }}" \
+            -DFUNCTION_RESOURCE_GROUP="${{ inputs.function_resource_group }}"
+
+      - name: Verify the function registered
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if az functionapp function list -g "${{ inputs.function_resource_group }}" \
+                -n "${{ inputs.function_app_name }}" \
+                --query "[?name=='${{ inputs.function_app_name }}/PrisonCourtRegisterHearingResulted']" \
+                -o tsv | grep -q .; then
+              echo "Function registered."
+              exit 0
+            fi
+            echo "Not registered yet (Java cold start on Elastic Premium can take up to a minute) — attempt $attempt/6"
+            sleep 15
+          done
+          echo "::error::PrisonCourtRegisterHearingResulted did not register after deploy"
+          exit 1
 
       - name: Summarise
         if: always()
