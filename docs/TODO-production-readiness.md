@@ -1,6 +1,6 @@
 # TODO — production readiness
 
-**As at 7 Aug 2026.** The relay works end to end in STE-CCP0121: Event Grid delivers, the event is
+**As at 10 Aug 2026.** The relay works end to end in STE-CCP0121: Event Grid delivers, the event is
 parsed, TLS to the PCR ingress succeeds, and failures retry then propagate so Event Grid redelivers.
 Everything below is what stands between that and running in production.
 
@@ -11,32 +11,20 @@ an inability to deploy; **P2** would make an incident hard to diagnose; **P3** i
 
 ## 1. Blockers
 
-### 1.1 The PCR service cannot connect to Redis — P1, not ours to fix
-The only failing hop, and now precisely diagnosed. `POST /pcr/internal/hearing-results` returns `500`
-with a structured body:
+### 1.1 The PCR service cannot connect to Redis — P1, owned by the PCR team
+The only failing hop. `POST /pcr/internal/hearing-results` returns `500` with
+`{"message":"Unable to connect to Redis","traceId":"c5f6e6d5c2cba9e70cdc23eda453aecc"}`. That also
+explains why it is a 500 and not the `503` its contract documents for "hearing details not complete
+yet": the 503 path assumes Redis is reachable and the entry merely absent, so it was never reached.
+Nothing about a synthetic `hearingId` is at fault, and nothing in this repo needs to change.
 
-```json
-{"message":"Unable to connect to Redis",
- "traceId":"c5f6e6d5c2cba9e70cdc23eda453aecc",
- "timestamp":"2026-08-07T15:57:42Z"}
-```
+- [ ] Give the PCR team that `traceId` and confirm Redis connectivity in this environment
+- [ ] Once reachable, re-run the smoke test (`DEPLOYMENT.md` §7.1) and confirm the 503 path exists —
+      our retry/no-retry split assumes it, and it has never been observed
 
-This also explains why it is a `500` and not the `503` the contract documents for "hearing details not
-complete yet". That 503 path assumes Redis is *reachable* and the entry merely absent; here the
-**connection itself** fails, which `GlobalExceptionHandler` maps to a generic 500. So the documented
-not-ready path was never reached, and nothing about a synthetic `hearingId` is at fault.
-
-- [ ] Give the PCR service team that `traceId` — it will appear in their logs
-- [ ] Confirm Redis connectivity from the PCR service in this environment (`RedisInitialise` config,
-      network path, credentials)
-- [ ] Once Redis is reachable, re-run the relay smoke test (`docs/DEPLOYMENT.md` §7.1) and confirm the
-      503 path is reachable — our retry/no-retry split assumes it exists and it has never been observed
-
-**Owner:** PCR service team. Nothing to change in this repo.
-
-Worth noting the relay behaves correctly under this failure: 500 is genuinely transient, so retrying is
-right. But it means every event burns 3 in-process attempts *and* up to 30 Event Grid deliveries over
-24h for as long as Redis is down — which is why 1.2 matters more than it first appeared.
+The relay behaves correctly meanwhile (500 is transient, so retrying is right), but every event then
+burns 3 in-process attempts *and* up to 30 Event Grid deliveries over 24h — which is why 1.2 matters
+more than it first appeared.
 
 ### 1.2 No dead-letter destination — P1, silent data loss
 Verified: `egs-pcr-relay` has `deadLetterDestination: null`. With 30 attempts over 24h, a permanently
@@ -145,42 +133,60 @@ synthetic one, so the test would only re-observe the Redis error and prove nothi
 
 ## 4. Security and supply chain
 
-### 4.1 CA bundle is out of the working tree, still in history — P2
-The bundle is **no longer tracked**: `.gitignore` excludes `.local/` and the bare filename at any path,
-local builds read `.local/internal_ca_certs.pem`, and CI reads `CA_BUNDLE_SOURCE`. A set-but-unusable
-path fails the build rather than falling back.
+### 4.1 CA bundle now lives in a GitHub secret — DONE
+Source of truth is the **`PCR_INTERNAL_CA_BUNDLE` repo secret**, set 10 Aug 2026 and verified in CI (4
+certificates from the secret into the zip). Nothing certificate-shaped is tracked, and a set-but-unusable
+`CA_BUNDLE_SOURCE` fails the build rather than falling back. **Rotation is a secret update plus a
+rebuild.** A repo-level secret suffices — the bundle carries both live and non-live roots, so one value
+serves every environment, and the earliest expiry is April 2028.
 
-Two things are still open, and the first is now the more urgent because **CI currently packages no
-bundle at all** — a green build whose artefact cannot complete TLS:
-
-- [ ] Set the `PCR_INTERNAL_CA_BUNDLE` secret (plain PEM or base64). Until then, deploy only from a
-      local build that has `.local/internal_ca_certs.pem` in place, or the app fails every relay at the
-      TLS handshake
-- [ ] Rewrite history to remove the previously-committed bundle, before the repo could return to
-      public. Until then it stays private, and those CAs should be treated as exposed to anyone who has
-      cloned it — if that is not acceptable, rotate them rather than merely un-committing
-
-Optional: move the bundle to Key Vault rather than a GitHub secret — only the one CI step changes
-(`azure/login` + `az keyvault secret download` writing to the same path), which needs the same
-federated credential as 1.3. Open item **7a**; full rationale in `README` → *Internal CA trust*.
+**Key Vault: considered, not pursued.** It changes one CI step, needs the federated credential from 1.3,
+and buys nothing while the secret works and nothing expires for years. Open item **7a** closed on that
+basis. The history exposure is a separate problem — see 4.5.
 
 ### 4.2 Secret scanning and push protection are off — P2
-Blocked by an enterprise policy (`HTTP 422 — Contact your enterprise owner`). The reference repo
-`service-cp-crime-results-pcr` has both enabled, so this app is below the estate's own bar.
+Blocked by an enterprise policy (`HTTP 422 — Contact your enterprise owner`), and **still blocked after
+the repo went public**, so this is not a licensing question and cannot be fixed at repo level. The
+reference repo `service-cp-crime-results-pcr` has secret scanning enabled, so this app is below the
+estate's own bar. Given 4.5, note that GitHub will not alert on committed credentials here.
 
 - [ ] Get an enterprise owner to enable them, or attach the org code-security configuration
 
-### 4.3 CodeQL on a private repo needs GHAS — P2
-The repo was public when CodeQL was set up. Code scanning on private repos requires GitHub Advanced
-Security.
+### 4.3 Code scanning — RESOLVED by going public
+An enterprise policy blocked enabling Code Security on the private repo (`422`); going public removed
+the licence gate, and `Analyze (java)` now passes.
 
-- [ ] Confirm GHAS covers this repo; if not, `codeql.yml` will fail on licensing rather than on findings
+Recorded because it cost time: the `main` ruleset requires a check named `CodeQL` as well as
+`Analyze (java)`. That one is published by the **code-scanning feature itself**, not by `codeql.yml`, so
+while scanning was off it never reported and looked like a ruleset demanding a non-existent check. It was
+not. **Do not "fix" this by dropping required checks.**
 
 ### 4.4 Two dependency bots — P3
 Both `renovate.json` and `.github/dependabot.yml` are active, as in the PCR service. Expect duplicate
 bump PRs.
 
 - [ ] Consolidate on one, or accept and document it
+
+### 4.5 The old CA bundle is in public git history — P1, already happened
+The repo went public on 7 Aug 2026 with the previously-committed bundle still in history, retrievable from
+commits `7f3fce5` and `34f9563`; two commit messages on published branches also name an internal ingress
+host. Untracking it (4.1) did not remove it from history, and any existing clone or fork keeps it.
+
+Scope before deciding: the bundle is 4 `CERTIFICATE` blocks and **zero** `PRIVATE KEY` blocks. A CA
+certificate is a public object, presented in every handshake to that ingress — so this is **not** a key
+compromise and nobody can impersonate anything with it. What it discloses is internal PKI and naming
+topology, via the certificate subjects, which is what the PCR design doc redacts as "not for a public
+repo". Deliberately not repeated here.
+
+So the question is not whether to rotate — that does not un-publish a hostname — but whether
+internal-name disclosure is acceptable for a public repo in this estate.
+
+- [ ] Delete the stale branches carrying the host in their commit messages — cheapest, removes the most
+      greppable copy
+- [ ] Get a platform/security decision. If the disclosure is acceptable, close this and drop the
+      redaction convention from these docs, which currently contradicts the repo being public
+- [ ] If it is not: private again and rewrite history. Note orphaned commits stay reachable via the API
+      for a period even after branch deletion
 
 ---
 
@@ -215,24 +221,29 @@ environment as the default.
 
 ## 6. Quick wins
 
-- [ ] Merge PR #7 — the CA bundle is deployed to STE but not on `main`, so `main` cannot currently
-      produce a working artefact
-- [ ] Delete the stale `feature/docs-and-deploy-corrections` and `feature/private-ca-trust` branches
-      (needs a temporary ruleset bypass — they carry an unscrubbed commit message)
+- [ ] **Remove the `pull_request` rule from the `feature-branches` ruleset.** It applies to
+      `refs/heads/feature/**` with no bypass actors, so commits cannot be pushed to a feature branch —
+      only branch *creation* is allowed, and no branch can accumulate the commits a PR would merge. It
+      has already forced three throwaway branches. `pull_request` is correctly enforced on `main` via
+      `~DEFAULT_BRANCH`; on source branches it is self-defeating
+- [ ] Delete the stale `feature/*` branches, including the merged ones (`deletion` is no longer in the
+      ruleset, so this now works)
 - [ ] Add a `SECURITY.md`, which the PCR service has and this repo lacks
 - [ ] Record an owning team and support model in `README`
+
+Done: PR #7 merged, so `main` can produce a working artefact; `PCR_INTERNAL_CA_BUNDLE` set, so CI
+artefacts contain the CA bundle.
 
 ---
 
 ## Dependency map
 
 ```
-1.3 federated credential ──┬──▶ 1.4 multi-environment deploy
-                           └──▶ 4.1 CA bundle from Key Vault ──▶ repo can return to public
+1.3 federated credential ──▶ 1.4 multi-environment deploy
 1.1 PCR Redis connectivity ──▶ 3.4 real-hearing test ──▶ production readiness
 1.2 dead-letter ──▶ 2.2 alerts
+4.5 history exposure ──▶ (decision, then possibly private + rewrite)
 ```
 
-**The single highest-leverage item is 1.3.** It unblocks automated deployment, the Key Vault work, and
-multi-environment promotion — and removes the dependence on time-boxed human elevation that blocked
-this work twice.
+**The highest-leverage item is 1.3.** It unblocks automated deployment and multi-environment promotion,
+and removes the dependence on time-boxed human elevation that blocked this work twice.

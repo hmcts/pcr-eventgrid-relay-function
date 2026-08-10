@@ -19,12 +19,18 @@ beyond `data.hearingId`, it probably belongs in that service instead.
 
 ### Why it exists
 
-The accepted PCR ingestion design (ADR-007 / AMP-892, in
+**Event Grid cannot deliver to the PCR service directly.** Webhook delivery needs an endpoint Event
+Grid can reach publicly and whose TLS it can validate against public CAs; the PCR ingestion API is
+behind an internal ingress with a **private-CA certificate**, so it fails both. This relay runs in the
+VNet and adds that CA to its own trust store (`AdditiveTrust`) — something Event Grid cannot do. That
+is the load-bearing reason it exists; do not describe it as merely a convenience layer.
+
+Two consequences fall out for free, and the accepted design (ADR-007 / AMP-892, in
 `../service-cp-crime-results-pcr/docs/designs/2026-07-29-pcr-eventgrid-webhook-ingestion-design.md`)
-had Event Grid delivering directly to a webhook on the PCR service, which forced that service to own
-a public HTTPS endpoint, the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake, and network
-isolation in place of app auth. This Function App absorbs that surface: the `@EventGridTrigger`
-binding answers the validation handshake itself, so no handshake code exists in either codebase.
+had Event Grid delivering directly to a webhook on the PCR service instead: the `@EventGridTrigger`
+binding answers the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake itself, so no handshake
+code exists in either codebase, and the public HTTPS endpoint plus network-isolation-in-place-of-app-auth
+surface stays out of the PCR service.
 
 ### What it does NOT do — correct this if you see it stated otherwise
 
@@ -56,18 +62,24 @@ TLS handshake — as a bare `IOException`, not an HTTP status. `AdditiveTrust` a
 from `PCR_SERVICE_CA_BUNDLE_PATH`, adding those CAs to the platform defaults (never replacing them).
 `NODE_EXTRA_CA_CERTS`, which the Node siblings use, has no JVM equivalent.
 
-**No certificate material is tracked in this repo.** `stageInternalCaBundle` takes the bundle from
-`CA_BUNDLE_SOURCE` when set — which is what CI does, materialising it from the
-`PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — and otherwise from `.local/internal_ca_certs.pem`,
-which is git-ignored and exists only on a developer machine. A set-but-missing or non-PEM
-`CA_BUNDLE_SOURCE` **fails the build** rather than falling back, so CI can never silently ship a
-certificate infrastructure did not supply. With neither source the build warns and packages nothing,
-which is correct locally but would break a deployment.
+**No certificate material is tracked here, and the `PCR_INTERNAL_CA_BUNDLE` repo secret is the source
+of truth** (set and verified in CI: 4 certs from the secret into the zip). `stageInternalCaBundle` reads
+`CA_BUNDLE_SOURCE` when set — which is what CI does, materialising the secret into `RUNNER_TEMP` — and
+otherwise `.local/internal_ca_certs.pem`, a git-ignored local convenience copy. If the two disagree the
+secret wins. Rotation is a secret update plus a rebuild: no code change, and no Key Vault work (TODO 4.1
+records why that was dropped).
 
-The bundle *was* committed for a period, so it is still in git history: the repo stays **private**
-until that history is rewritten (TODO 4.1). Do not re-add a PEM to the working tree — `.gitignore`
-blocks `.local/` and the bare filename at any path on purpose.
-Full rationale, rejected alternatives and prerequisites are in README.md under "Internal CA trust".
+Two behaviours that must not be "fixed" into each other: a **set but unusable** `CA_BUNDLE_SOURCE`
+fails the build, so CI can never silently ship a certificate infrastructure did not supply; **no bundle
+at all** only warns, because local builds and the integration tests (plain HTTP) do not need one.
+
+Do not re-add a PEM to the working tree — `.gitignore` blocks `.local/` and the bare filename at any
+path on purpose. The bundle *was* committed for a period and the repo is now **public**, so it is
+publicly retrievable from history: certificates only, no private keys, so this is name/PKI disclosure
+rather than a key compromise. TODO 4.5 has the scoping and the open decision. Do not paste the
+certificate subjects into any file in this repo.
+
+Full rationale and rejected alternatives are in README.md under "Internal CA trust".
 
 Do not "simplify" any of this without reading that section:
 
@@ -75,8 +87,8 @@ Do not "simplify" any of this without reading that section:
   `/var/ssl/certs`, not a PEM bundle at one path.
 - Trust must stay **additive**. Trusting only the private CA silently breaks TLS to every public
   endpoint, and a test asserts the store is `platform defaults + 1`.
-- The build must keep succeeding-with-a-warning when the bundle is missing, so the CI-fetch migration
-  can land without a chicken-and-egg failure.
+- Importing the CAs into the JVM's `cacerts` is not an alternative either — it needs a startup command
+  mutating the JDK inside a managed Functions host, and is invisible to anyone reading the app config.
 
 ## Build & Test Commands
 
@@ -276,12 +288,19 @@ In-process retries sit *under* Event Grid's retry policy, so total attempts mult
 
 Check whether these are still open before touching the related code:
 
-1. **`eventType` filtering.** The PCR spec allows only `Hearing_Resulted` and answers 400
-   (non-retryable) otherwise, but the topic also carries `Hearing_Resulted_Complex` (see
-   `Constants.HEARING_RESULTED_COMPLEX` and `HearingResultedDVLAEventGridTrigger/index.js:17` in
-   `cpp-context-azure-legalaidagency`). This app deliberately does not filter. The fix belongs in the
-   `pcr-hearing-results` subscription filter, not here — do not add client-side `eventType` filtering
-   without first confirming that decision.
+1. **`eventType` filtering — checked, not a live risk.** The PCR service answers 400 (non-retryable)
+   for an `eventType` it does not recognise, and the topic also carries `Hearing_Resulted_Complex`
+   (`Constants.HEARING_RESULTED_COMPLEX` in `cpp-context-azure-legalaidagency`). This app deliberately
+   does not filter, and that is safe: the topic already separates event types across subscriptions, so
+   `Hearing_Resulted_Complex` is delivered to a **different** subscription. Correctness therefore rests
+   on `egs-pcr-relay` being created with `--included-event-types Hearing_Resulted`, exactly like its
+   siblings — config, so re-verify it per environment (TODO 5.2). Do **not** add client-side filtering.
+
+   Two details that have each been got wrong once, from reading the design doc instead of the built
+   artefact: the 400 is a service-side branch in `HearingResultedWebhookService`, **not** schema
+   validation — in the shipped spec `eventType` is a plain string with `Hearing_Resulted` as an
+   *example*, not an enum. And the subscription is `egs-pcr-relay`; `pcr-hearing-results` is a name
+   from ADR-007 that was verified **not** to exist.
 2. **CI deploy credentials are not provisioned.** CI is GitHub Actions (see below) and builds green,
    but the `Deploy` job in `ci-build-deploy.yml` needs an Entra federated credential for this repo
    plus `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`. Without them it **skips with

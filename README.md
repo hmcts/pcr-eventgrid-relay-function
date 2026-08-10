@@ -11,42 +11,48 @@ topic: Hearing_Resulted  ──────▶  PrisonCourtRegisterHearingResult
 
 ## Why this app exists
 
-The accepted PCR ingestion design ([ADR-007 / AMP-892](../service-cp-crime-results-pcr/docs/designs/2026-07-29-pcr-eventgrid-webhook-ingestion-design.md))
-has Event Grid delivering **straight to a webhook** on `service-cp-crime-results-pcr`. That pulls an
-Event Grid-shaped surface into the service:
+**Event Grid cannot deliver to the PCR service directly.** Webhook delivery needs an endpoint Event
+Grid can reach over the public internet *and* whose TLS certificate it can validate against public
+CAs. The PCR ingestion API sits behind an internal ingress presenting a **private-CA certificate** —
+so it fails both tests, and no public CA chain exists that would let Event Grid trust it.
 
-- a public-ish HTTPS endpoint it owns and secures,
-- the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake, implemented by hand,
-- network isolation standing in for application-level auth (`security: []`).
+This relay closes that gap. It runs inside the VNet, so it can reach the internal ingress, and it adds
+the private CA to its own trust store at runtime (`AdditiveTrust`) — something Event Grid itself has no
+way to do. Event Grid delivers to a Function App it *can* validate; the PCR service receives an
+ordinary internal HTTP call.
 
-Putting this Function App in front moves that surface out of the service. The
-`@EventGridTrigger` binding performs the subscription-validation handshake itself, so **no handshake
-code is needed anywhere**, and the PCR service is left receiving an ordinary internal HTTP call.
+Two things fall out for free, which is why the accepted design
+([ADR-007 / AMP-892](../service-cp-crime-results-pcr/docs/designs/2026-07-29-pcr-eventgrid-webhook-ingestion-design.md))
+is better served this way than by the webhook-on-the-service it originally specified:
 
-> That handshake claim is **verified**, not assumed: `EventGridRelayIntegrationTest` sends a real
+- the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake is handled by the `@EventGridTrigger`
+  binding, so **no handshake code is needed anywhere**;
+- the Event Grid-shaped surface — a public HTTPS endpoint, and network isolation standing in for
+  application-level auth (`security: []`) — stays out of the PCR service entirely.
+
+> The handshake claim is **verified**, not assumed: `EventGridRelayIntegrationTest` sends a real
 > `Microsoft.EventGrid.SubscriptionValidationEvent` to the real Functions host and asserts it answers
 > `200 {"validationResponse": "<code>"}` without the event ever reaching the PCR service. If that
 > test is ever deleted, this design's main justification becomes unevidenced again.
 
-No durable task hub, no Redis, no orchestration state — this app holds no state at all.
+No durable task hub, no Redis, no orchestration state — this app holds no state at all. The private-CA
+trust it needs is explained in *Internal CA trust* below.
 
 ## What this does NOT replace
 
-**The legacy JavaScript durable-functions chain keeps running.** The
-`prisoncourtregister-azure-functions` packaging module in
-[`cpp-context-azure-legalaidagency`](../../cpp/cpp-context-azure-legalaidagency) is *not* being
-retired by this work, and this app is *not* a rewrite of it. The PCR API-marketplace design says so
-explicitly — §13 non-goals: *"Changing or retiring existing email/post PCR distribution — additional
-channel, not a replacement"* — and §4a notes the legacy Function App **already listens to the same
-`Hearing_Resulted` event** on its own subscription.
+**The legacy JavaScript durable-functions chain keeps running**, and this app is *not* a rewrite of it.
+The `prisoncourtregister-azure-functions` module in
+[`cpp-context-azure-legalaidagency`](../../cpp/cpp-context-azure-legalaidagency) already listens to the
+same `Hearing_Resulted` event on its own subscription (design §4a), and §13 non-goals is explicit:
+*"Changing or retiring existing email/post PCR distribution — additional channel, not a replacement"*.
 
-The two pipelines run side by side, each with its own Event Grid subscription off the same topic:
+This relay **adds** a channel. The two pipelines run side by side off the same topic:
 
 ```
                           Azure Event Grid — topic: Hearing_Resulted
                                         │
               ┌─────────────────────────┴──────────────────────────┐
-              │ (existing subscription)          (pcr-hearing-results)
+              │ (existing subscription)             (egs-pcr-relay)
               ▼                                                    ▼
   PrisonCourtRegisterEventGridTrigger                 PrisonCourtRegisterHearingResulted
     └─ PrisonCourtRegisterOrchestrator                   (this app)
@@ -64,16 +70,8 @@ The two pipelines run side by side, each with its own Event Grid subscription of
                                                     API Marketplace subscribers
 ```
 
-So this relay adds a channel; it removes nothing. Two consequences worth holding onto:
-
-- **The legacy chain is a live dependency, not dead weight.** The PCR design (§4d) warns that both the
-  Event Grid subscription *and* the Redis cache the PCR service reads may be provisioned as part of
-  the legacy Function App's own Azure resources — "if the Function App is retired, this service's
-  trigger *and* its primary data lookup could both disappear at once". Do not treat the legacy app as
-  safe to switch off.
-- **Register-building logic is reimplemented, not moved.** The PCR service ports the *decision and
-  transform* logic (design §5, "what to port, what not to"); the legacy app keeps its own copy for the
-  PDF path. Expect the two to need keeping in step.
+The legacy app is a **live dependency**, not dead weight — do not treat it as safe to switch off. See
+`CLAUDE.md` → *What it does NOT do* and `docs/pipeline/initial-implementation/plan.md` §2a.
 
 ## The function
 
@@ -83,10 +81,7 @@ So this relay adds a channel; it removes nothing. Two consequences worth holding
 
 ### What gets sent
 
-The event is relayed **verbatim**, wrapped in the single-element JSON array that
-`POST /internal/hearing-results` expects (`requestBody` is an array of EventGridSchema events).
-Relaying rather than reshaping means the PCR service needs **no new contract** for this app — it
-receives exactly the request Event Grid itself would have made.
+`POST /internal/hearing-results`, the event verbatim in a single-element array:
 
 ```json
 [
@@ -106,8 +101,8 @@ receives exactly the request Event Grid itself would have made.
 ]
 ```
 
-The app models only `data.hearingId` (to skip pointless deliveries and correlate logs). Everything
-else — including fields the publisher adds later — passes through untouched.
+Only `data.hearingId` is read, for correlation. Everything else passes through untouched, so the PCR
+service needs no new contract — it receives exactly the request Event Grid would have made.
 
 ### Behaviour on failure
 
@@ -125,33 +120,6 @@ Status handling follows the endpoint's documented semantics:
 In-process retries sit **under** Event Grid's own retry policy (exponential backoff, up to 24 hours),
 so total attempts multiply. Keep `FORWARD_MAX_ATTEMPTS × FORWARD_RETRY_DELAY_IN_SECONDS` comfortably
 below the Function App timeout.
-
-## `eventType` filtering — resolved
-
-The PCR service answers **400 (non-retryable)** for an `eventType` it does not recognise — its
-`HearingResultedWebhookService` branches on the value. Since this app relays whatever the subscription
-delivers and does **not** filter on `eventType`, that looked like a live risk: the topic also carries
-`Hearing_Resulted_Complex` (`Constants.HEARING_RESULTED_COMPLEX` in the legacy code).
-
-(The rejection is a service-side branch, not schema validation — in the shipped spec
-`HearingResultedWebhookEvent.eventType` is a plain string with `Hearing_Resulted` only as an *example*,
-not an enum. An earlier draft of this README claimed an enum, from the design doc rather than the
-built artefact.)
-
-**Checked against the real topic (`eg-ste-ccp0121-hearingres`) — the risk does not apply.** Event types
-are already separated across subscriptions:
-
-```
-egs-prison-court       AzureFunction   includedEventTypes = [Hearing_Resulted]
-egs-court-register     AzureFunction   includedEventTypes = [Hearing_Resulted]
-egs-laa                AzureFunction   includedEventTypes = [Hearing_Resulted]
-egs-nowsce-complex     StorageQueue    includedEventTypes = [Hearing_Resulted_Complex]   ← separate
-egs-sjp-hearing-resulted  AzureFunction  includedEventTypes = [SJP_Hearing_Resulted]
-```
-
-`Hearing_Resulted_Complex` goes to a different subscription entirely. So this app's subscription simply
-needs `--included-event-types Hearing_Resulted`, exactly like its seven siblings, and no client-side
-filtering is warranted. See the deployment section.
 
 ## Configuration
 
@@ -227,61 +195,39 @@ infrastructure was *supposed* to supply one would ship something nobody reviewed
 string, so the build also rejects a file containing no `BEGIN CERTIFICATE` block, and both
 `verifyStagedApp` and the CI zip check assert the bundle actually reached the artefact.
 
-### The repository no longer tracks any certificate
+### Where the bundle lives
 
-No certificate material is checked in. `.gitignore` excludes `.local/` and the bare filename
-`internal_ca_certs.pem` at any path, the latter specifically so the bundle cannot drift back to the
-repo root where it used to live.
-
-**This does not undo the past.** The bundle *was* committed for a period, so it remains in git history
-and in every existing clone and fork. Two consequences:
-
-- **The repo must stay private for now.** It was public initially, and the certificates were
-  deliberately kept out of it: they carry internal domain names, and the PCR design doc redacts the
-  equivalent hostname as "not for a public repo". Going private was a decision taken specifically to
-  allow committing the bundle, and it has costs — code scanning on private repos needs GitHub Advanced
-  Security, and Actions minutes bill against the org quota. Returning to public needs a **history
-  rewrite**, tracked in TODO 4.1.
-- **Treat those CAs as exposed to anyone who has ever cloned the repo.** If that is not acceptable,
-  the CAs need rotating rather than merely un-committing.
-
-Until the `PCR_INTERNAL_CA_BUNDLE` secret is set, **CA rotation is still a manual step** for whoever
-deploys — they need the current bundle at `.local/internal_ca_certs.pem`.
-
-### What is left to do
-
-The build and CI wiring for an infrastructure-supplied bundle is **in place**:
+**The `PCR_INTERNAL_CA_BUNDLE` GitHub secret is the source of truth.** It holds the PEM itself, not a
+path. CI writes it to `$RUNNER_TEMP` — outside the workspace, so it cannot be committed by accident —
+and points `CA_BUNDLE_SOURCE` at that file:
 
 ```
 ci-build-deploy.yml
   └─ Build job
        1. Materialise the internal CA bundle   →  $RUNNER_TEMP/internal_ca_certs.pem
-          (from the PCR_INTERNAL_CA_BUNDLE secret; base64 or plain PEM)
+          (from the PCR_INTERNAL_CA_BUNDLE secret; plain PEM or base64)
           exports CA_BUNDLE_SOURCE
        2. ./gradlew build                      ← stageInternalCaBundle reads CA_BUNDLE_SOURCE
        3. ./gradlew azureFunctionsPackageZip
        4. Verify packaged zip                  ← asserts the bundle is in the artefact
 ```
 
-Two things remain, and neither is a code change:
+Set, and verified in CI: 4 certificates from the secret into the zip. **CA rotation is now a secret
+update plus a rebuild — no code change.** To rotate, `gh secret set PCR_INTERNAL_CA_BUNDLE < <pem>`.
 
-- **Set `PCR_INTERNAL_CA_BUNDLE`** as a repo or environment secret. Until then CI warns and packages
-  **no bundle at all** — the artefact is valid and the build is green, but deploying it gives an app
-  that fails every relay at the TLS handshake. Until it is set, deploy from a local build that has
-  `.local/internal_ca_certs.pem` in place.
-- **Rewrite history** to remove the previously-committed bundle, if the repo is to go public again.
+`.local/internal_ca_certs.pem` remains only as a convenience for local builds and manual deploys, and
+is git-ignored. It is a copy, not the source of truth — if the two ever disagree, the secret wins.
 
-If the bundle would rather live in Key Vault than a GitHub secret, only step 1 changes — swap the
-secret for `azure/login` plus `az keyvault secret download`, writing to the same path and exporting
-the same variable. Nothing downstream cares where the file came from. Note this needs the same
-federated credential as TODO 1.3.
+A repo-level secret is sufficient because the bundle carries **both live and non-live roots**, so one
+value serves every environment. Earliest expiry is April 2028.
 
-What finishing this buys:
+Key Vault was considered and is **not** being pursued: it would change only step 1
+(`azure/login` + `az keyvault secret download` to the same path), needs the federated credential from
+TODO 1.3, and buys nothing while the secret works and nothing expires for years. Revisit if the
+platform team wants CA material centralised.
 
-- the repo can go **public again**, matching the rest of the estate;
-- **CA rotation is an infrastructure change** — update the Key Vault secret, redeploy, no code commit;
-- no certificate material in git history;
-- local development is unaffected: the bundle stays optional, and the integration tests use plain HTTP.
+Still outstanding: the bundle was committed for a period, so it remains in **git history**. That is now
+a live exposure rather than a future caveat — see TODO 4.1.
 
 What it needs, and why it is not done yet:
 
@@ -407,21 +353,12 @@ worker provides its own copy, and two copies on the classpath risk binding-resol
 produced. If you add another worker-provided dependency, add its pattern to
 `workerProvidedJarPatterns`.
 
-## Java 25
-
-Targets **Java 25** (LTS) via a Gradle toolchain — the same version
-`service-cp-crime-results-pcr` uses. Java 25 is GA on the Azure Functions Java runtime, supported
-until May 2029. Verified locally on Temurin 25.0.2 (bytecode major version 69).
-
-CI installs it with `actions/setup-java@v5` (`java-version: '25'`), so no bespoke agent image is
-needed — this is why CI runs on GitHub Actions rather than the Azure DevOps pool, whose shared
-identifiers are Java 21.
-
 ## CI
 
 **GitHub Actions**, following `service-cp-crime-results-pcr`. There is no `azure-pipelines.yaml` —
 it was removed, because the shared `context-verify` template drives Maven and the CPP pool offers
-only Java 21 agents, so it could never have built this repo.
+only Java 21 agents, so it could never have built this repo. `actions/setup-java@v5` installs the
+Java 25 the toolchain requires, with no bespoke agent image.
 
 | Workflow | Trigger | Does |
 |---|---|---|
