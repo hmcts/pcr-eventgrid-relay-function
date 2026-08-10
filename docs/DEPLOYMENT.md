@@ -53,8 +53,8 @@ alongside the seven sibling hearing-resulted apps.
 | Event subscription | `egs-pcr-relay` | **created by this work** |
 | VNet / subnet | `VN-STE-INT-01` / `sn-ste-ccp0121-courtreg` in **`RG-STE-INT-01`** | existing, shared |
 
-Only the app and the subscription are new. Everything else is reused — so do **not** let the Gradle
-plugin create a plan.
+Only the app and the subscription are new; everything else is reused, so do **not** let the Gradle plugin
+create a plan.
 
 ### 2.2 Other environments
 
@@ -72,24 +72,20 @@ Two things to check per environment before starting:
 
 ## 3. Environment-specific settings
 
-Only three settings vary by environment. The rest are either created by Azure or identical everywhere.
+Only one setting genuinely varies. The full list of app settings is in `README` → *Configuration*; this
+is what changes when you move environment.
 
-| Setting | Varies? | Value | Notes |
-|---|---|---|---|
-| `PCR_SERVICE_INGESTION_ENDPOINT` | **yes** | `https://<ingress-host>/pcr/internal/hearing-results` | Path is ingress prefix `/pcr` + the service's `POST /internal/hearing-results`. Taken from the built `api-cp-crime-results-pcr` artefact, **not** from ADR-007, which documents a path that never shipped |
-| `PCR_SERVICE_CA_BUNDLE_PATH` | no | `/home/site/wwwroot/internal_ca_certs.pem` | Where `stageInternalCaBundle` puts the bundle |
-| `FORWARD_MAX_ATTEMPTS` | tune | `3` | In-process retries, *under* Event Grid's 30 |
-| `FORWARD_RETRY_DELAY_IN_SECONDS` | tune | `2` | Keep `attempts × delay` well below the Function App timeout |
-| `HTTP_CLIENT_CONNECT_TIMEOUT_IN_SECONDS` | no | `10` (default) | Optional |
-| `HTTP_CLIENT_RESPONSE_TIMEOUT_IN_SECONDS` | no | `30` (default) | Optional |
-| `PCR_SERVICE_INGRESS_HEADER_NAME` / `_VALUE` | no | unset | The endpoint is `security: []`. Only set if an ingress in front of it demands a header |
-| `FUNCTIONS_WORKER_RUNTIME` | no | `java` | Set by `functionapp create` |
-| `FUNCTIONS_EXTENSION_VERSION` | no | `~4` | Set by `functionapp create` |
-| `WEBSITE_RUN_FROM_PACKAGE` | **managed** | a **blob SAS URL** | Set by `azureFunctionsDeploy`. **Do not hand-edit** — see §7.4 |
+| Setting | | |
+|---|---|---|
+| `PCR_SERVICE_INGESTION_ENDPOINT` | **varies** | `https://<ingress-host>/pcr/internal/hearing-results` — ingress prefix `/pcr` + the service's `POST /internal/hearing-results`. Taken from the built `api-cp-crime-results-pcr` artefact, **not** ADR-007, which documents a path that never shipped |
+| `FORWARD_MAX_ATTEMPTS` / `_RETRY_DELAY_IN_SECONDS` | tune | `3` / `2`. In-process retries sit *under* Event Grid's 30; keep `attempts × delay` well below the Function App timeout |
+| `PCR_SERVICE_CA_BUNDLE_PATH` | fixed | `/home/site/wwwroot/internal_ca_certs.pem` — where `stageInternalCaBundle` puts the bundle |
+| `WEBSITE_RUN_FROM_PACKAGE` | **managed** | a blob SAS URL, set by `azureFunctionsDeploy`. **Do not hand-edit** — see §7.4 |
 
-Azure-managed, do not set by hand: `AzureWebJobsStorage`, `APPLICATIONINSIGHTS_CONNECTION_STRING`,
-`WEBSITE_CONTENTAZUREFILECONNECTIONSTRING`, `WEBSITE_CONTENTSHARE`, `MACHINEKEY_DecryptionKey`,
-`SCM_DO_BUILD_DURING_DEPLOYMENT`, `WEBSITES_ENABLE_APP_SERVICE_STORAGE`.
+Everything else is either defaulted in code or created by `functionapp create`. Do not set
+`AzureWebJobsStorage`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, `WEBSITE_CONTENT*`,
+`MACHINEKEY_DecryptionKey`, `SCM_DO_BUILD_DURING_DEPLOYMENT` or `WEBSITES_ENABLE_APP_SERVICE_STORAGE`
+by hand.
 
 ---
 
@@ -141,8 +137,8 @@ az functionapp vnet-integration add -g $RG -n $APP \
   --subnet "$(basename "$SUBNET_ID")"
 ```
 
-Copying the subnet from a sibling is deliberate: all apps on one App Service plan must use the same
-subnet, and the plan is already joined, so this consumes no extra addresses. Restarts the app.
+Copying a sibling's subnet is deliberate: all apps on one plan must share it, and the plan is already
+joined, so this consumes no extra addresses. Restarts the app.
 
 ### 4.3 Application settings
 
@@ -154,42 +150,22 @@ az functionapp config appsettings set -g $RG -n $APP --settings \
   FORWARD_RETRY_DELAY_IN_SECONDS=2
 ```
 
-`PCR_SERVICE_CA_BUNDLE_PATH` is **essential**. Without it the CA bundle ships but nothing reads it, and
-you get a TLS failure identical to having no bundle at all — the most confusing failure in this whole
-setup.
+`PCR_SERVICE_CA_BUNDLE_PATH` is **essential**: without it the bundle ships but nothing reads it, giving a
+TLS failure indistinguishable from having no bundle at all. `azureFunctionsDeploy` reasserts it, but a
+hand-created app will not have it.
 
 ### 4.4 Confirm the CA bundle is present
 
-The bundle can come from either of two places, and the build tells you which it used:
+CI takes the bundle from the `PCR_INTERNAL_CA_BUNDLE` secret automatically. **Building locally, a fresh
+clone has no bundle** — nothing certificate-shaped is committed — so get it from the platform team and
+put it at `.local/internal_ca_certs.pem`, or point `CA_BUNDLE_SOURCE` at a copy. Never commit it.
 
-```bash
-# From infrastructure — what CI does, and what a release build should do.
-CA_BUNDLE_SOURCE=/path/to/internal_ca_certs.pem ./gradlew azureFunctionsPackageZip
-#   -> "Staging CA bundle from CA_BUNDLE_SOURCE: /path/to/internal_ca_certs.pem"
-#   A path that does not exist, or a file with no BEGIN CERTIFICATE block, FAILS the build.
-
-# From the git-ignored local directory — the fallback when CA_BUNDLE_SOURCE is unset.
-./gradlew azureFunctionsPackageZip
-#   -> "Staging CA bundle from .local/internal_ca_certs.pem (CA_BUNDLE_SOURCE not set)"
-```
-
-**A fresh clone has no bundle**, because none is committed. Get the current one from the platform team
-(or from a colleague who has deployed) and put it at `.local/internal_ca_certs.pem` before deploying.
-Never commit it — `.gitignore` blocks it, deliberately.
-
-`verifyStagedApp` then fails the build if a bundle was available but did not reach the package, so a
-zip that would deploy and fail every relay at the TLS handshake cannot be produced silently.
-
-Confirm the bundle reached the artefact, rather than trusting the build log:
+Without either, the build **succeeds with a warning** and produces a package that cannot talk to PCR, so
+check the artefact rather than the build log:
 
 ```bash
 unzip -l build/azure-functions/*.zip | grep internal_ca_certs.pem
 ```
-
-With **neither** source available the build succeeds with a warning and produces a package that cannot
-talk to PCR. That is deliberate — local builds and the integration tests do not need a bundle — but it
-means a missing one is easy to overlook, so check the zip before deploying. See `README` →
-*Internal CA trust*.
 
 ---
 
@@ -207,11 +183,10 @@ az login
   -DFUNCTION_APP_SERVICE_PLAN=$PLAN
 ```
 
-The plugin packages, stages the CA bundle, prunes the worker-provided jar, uploads to blob storage, and
-points `WEBSITE_RUN_FROM_PACKAGE` at a SAS URL. It also applies the `azurefunctions` `appSettings`
-block, so `PCR_SERVICE_CA_BUNDLE_PATH` is reasserted on every deploy.
-
-Omit the `-D` overrides to use the STE-CCP0121 defaults from `build.gradle`.
+This packages, stages the CA bundle, prunes the worker-provided jar, uploads to blob storage and points
+`WEBSITE_RUN_FROM_PACKAGE` at a SAS URL. It also applies the `appSettings` block, so
+`PCR_SERVICE_CA_BUNDLE_PATH` is reasserted every deploy. Omit the `-D` overrides for the STE-CCP0121
+defaults.
 
 ### 5.1 Verify the function registered
 
@@ -240,10 +215,9 @@ az eventgrid event-subscription create \
   --max-delivery-attempts 30 --event-ttl 1440
 ```
 
-`--included-event-types Hearing_Resulted` is **required for correctness**, not tidiness. The topic also
-carries `Hearing_Resulted_Complex`, which the PCR service rejects with a non-retryable 400. Verified
-that the sibling subscriptions filter the same way and `Hearing_Resulted_Complex` goes to
-`egs-nowsce-complex` instead.
+`--included-event-types Hearing_Resulted` is **required for correctness**: the relay does not filter, and
+the topic also carries `Hearing_Resulted_Complex`, which PCR rejects with a non-retryable 400. (It
+currently goes to `egs-nowsce-complex`, so the risk is theoretical — but it is config, so re-check it.)
 
 **Add a dead-letter destination.** The siblings have none, so a permanently failing event is discarded
 after 24h with no record:
@@ -270,11 +244,10 @@ curl -s -w "\nHTTP %{http_code}\n" \
   -d "[{\"id\":\"smoke-$HID\",\"subject\":\"hearing/resulted\",\"eventType\":\"Hearing_Resulted\",\"eventTime\":\"$(date -u '+%Y-%m-%dT%H:%M:%SZ')\",\"dataVersion\":\"1.0\",\"data\":{\"hearingId\":\"$HID\",\"hearingDay\":\"$(date -u '+%Y-%m-%d')\",\"userId\":\"00000000-0000-0000-0000-000000000000\"}}]"
 ```
 
-This bypasses Event Grid, so it does not prove the subscription — but it proves the app, the CA trust
-and the network path. To test the subscription too, publish to the topic instead; note that fans out to
-**all** subscribers, so every sibling app will also process your synthetic event.
+This bypasses Event Grid, so it proves the app, the CA trust and the network path but **not** the
+subscription. Publishing to the topic tests that too, but fans out to every sibling app as well.
 
-Then read the logs (filter hard — App Insights is shared with seven other apps):
+Then read the logs — filter hard, App Insights is shared with seven other apps:
 
 ```bash
 AIID=$(az resource show -g $RG -n $AI --resource-type microsoft.insights/components --query properties.AppId -o tsv)
@@ -292,8 +265,7 @@ az monitor app-insights query --app "$AIID" --analytics-query \
 | `I/O failure … SSLHandshakeException` | Reached it, certificate rejected — CA bundle missing, wrong, or `PCR_SERVICE_CA_BUNDLE_PATH` unset |
 | `No hearingId on event - skipping` | Working as designed, not an error |
 
-That distinction is the fastest diagnostic here. Three separate causes produced an identical-looking
-failure during the first deployment.
+Start here. Three separate causes produced an identical-looking failure during the first deployment.
 
 ### 7.3 Expected status codes
 
@@ -308,10 +280,10 @@ There may be an ongoing deployment or your app setting has WEBSITE_RUN_FROM_PACK
 ```
 
 **Not transient — retrying will not clear it.** `azureFunctionsDeploy` sets
-`WEBSITE_RUN_FROM_PACKAGE` to a blob SAS URL; while it holds a URL the app runs from that fixed blob
-and Kudu ZipDeploy has nothing to update. The seven siblings use `WEBSITE_RUN_FROM_PACKAGE=1` and can
-use `config-zip`; this app cannot. To switch, set it to `1` — and remember `config-zip` does not apply
-the `appSettings` block, so `PCR_SERVICE_CA_BUNDLE_PATH` would then need setting by hand.
+`WEBSITE_RUN_FROM_PACKAGE` to a blob SAS URL, and while it holds a URL the app runs from that fixed blob,
+so Kudu ZipDeploy has nothing to update. The siblings use `WEBSITE_RUN_FROM_PACKAGE=1` and can use
+`config-zip`; this app cannot. Setting it to `1` switches over — but `config-zip` does not apply the
+`appSettings` block, so `PCR_SERVICE_CA_BUNDLE_PATH` would then need setting by hand.
 
 ### 7.5 Other failures seen for real
 
@@ -347,15 +319,13 @@ only way to stop delivery cleanly.
 
 ---
 
-## 9. Known state, 7 Aug 2026
+## 9. Known state
 
-Deployed and verified in STE-CCP0121: app loads on Java 25, function registered, Event Grid delivery
-works, event parsed, **TLS to the PCR ingress succeeds**, retry/backoff and propagate-on-exhaustion
-behave as designed.
+Verified end to end in STE-CCP0121 — delivery, parsing, **TLS to the PCR ingress**, retry and
+propagate-on-exhaustion. The one outstanding failure is the PCR service's own
+(`Unable to connect to Redis`) and belongs to that service.
 
-**Outstanding:** the PCR service answers `500` with `{"message":"Unable to connect to Redis"}`. That is
-the one remaining failure and belongs to that service — it also explains why the response is a 500
-rather than the `503` its contract documents, since that path assumes Redis is reachable and the entry
-merely absent.
+No other environment has a relay deployed. Current status and open work live in
+`docs/TODO-production-readiness.md`, which is kept up to date; this section is not.
 
 No other environment has a relay deployed. See `docs/TODO-production-readiness.md`.
