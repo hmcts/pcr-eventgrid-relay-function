@@ -10,8 +10,11 @@ name: CI Build and Deploy
 #   -----------                                    ---------
 #   publish bootJar to Maven repos          ->     (nothing — not a library)
 #   build Docker image, push to ghcr        ->     (nothing — no image)
-#   ADO pipeline 460: copy image to ACR     ->     (nothing)
-#   ADO pipeline 434: Helm deploy to AKS    ->     Azure/functions-action zip deploy
+#   ADO pipeline 460: copy image to ACR     ->     upload zip to target env's storage account
+#   ADO pipeline 434: Helm deploy to AKS    ->     trigger a dedicated Functions-deploy ADO
+#                                                   pipeline (azure-pipelines-deploy.yml),
+#                                                   since the shared CPP ADO agent pools only
+#                                                   offer Java 21 and this repo needs Java 25
 #
 on:
   workflow_call:
@@ -25,6 +28,9 @@ on:
         required: false
       GITLEAKS_LICENSE:
         required: false
+      HMCTS_ADO_PAT:
+        required: false
+        description: "PAT for triggering the ADO deploy pipeline. Deploy is skipped when unset, same as AZURE_CLIENT_ID."
       PCR_INTERNAL_CA_BUNDLE:
         required: false
         description: >-
@@ -301,18 +307,52 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy to Azure Functions
+      # No dedicated build-artifacts store exists (checked — only the per-environment
+      # storage accounts DEPLOYMENT.md already documents, e.g. sasteccp0121hearingres).
+      # Rather than provision a new one, upload straight into the target environment's
+      # own existing storage account. The ADO deploy pipeline resolves this same account
+      # from AzureWebJobsStorage for its own WEBSITE_RUN_FROM_PACKAGE step, so this is
+      # the one place the zip needs to land, not an intermediate copy.
+      - name: Upload package to target environment's storage account
         if: steps.creds.outputs.configured == 'true'
-        uses: Azure/functions-action@v1
+        id: upload
+        run: |
+          set -euo pipefail
+          STORAGE=$(az storage account list -g "${{ inputs.function_resource_group }}" --query "[0].name" -o tsv)
+          BLOB="${{ inputs.function_app_name }}-${{ needs.Artefact-Version.outputs.artefact_version }}.zip"
+
+          az storage container create --account-name "$STORAGE" --name releases --auth-mode login &>/dev/null || true
+          az storage blob upload --account-name "$STORAGE" --auth-mode login \
+            --container-name releases --name "$BLOB" \
+            --file "dist/${{ needs.Build.outputs.zip_name }}" --overwrite
+
+          echo "storage_account=$STORAGE" >> "$GITHUB_OUTPUT"
+          echo "blob_name=$BLOB" >> "$GITHUB_OUTPUT"
+
+      # Replaces the previous direct Azure/functions-action deploy — the shared CPP ADO
+      # agent pools only offer Java 21 (see CLAUDE.md), so build stays here, but actual
+      # deployment goes through ADO instead, matching how the PCR service's own pipeline
+      # is triggered from Actions (pipeline_id below is a placeholder — fill in once a
+      # Functions-capable pipeline, e.g. azure-pipelines-deploy.yml, is registered in ADO).
+      - name: Trigger ADO deploy pipeline
+        if: steps.creds.outputs.configured == 'true'
+        uses: hmcts/trigger-ado-pipeline@v2
         with:
-          app-name: ${{ inputs.function_app_name }}
-          package: dist/${{ needs.Build.outputs.zip_name }}
+          pipeline_id: 0   # TODO: replace once azure-pipelines-deploy.yml is registered
+          ado_pat: ${{ secrets.HMCTS_ADO_PAT }}
+          template_parameters: >
+            {
+              "environment": "${{ inputs.environment }}",
+              "artefactVersion": "${{ needs.Artefact-Version.outputs.artefact_version }}",
+              "storageAccount": "${{ steps.upload.outputs.storage_account }}",
+              "blobName": "${{ steps.upload.outputs.blob_name }}"
+            }
 
       - name: Summarise
         if: always()
         run: |
           if [ "${{ steps.creds.outputs.configured }}" = "true" ]; then
-            echo "Deployed ${{ needs.Artefact-Version.outputs.artefact_version }} to ${{ inputs.function_app_name }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Uploaded ${{ needs.Artefact-Version.outputs.artefact_version }} and triggered ADO deploy for ${{ inputs.function_app_name }}" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Deploy skipped — Azure credentials not configured. See ci-build-deploy.yml." >> "$GITHUB_STEP_SUMMARY"
           fi
