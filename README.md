@@ -81,10 +81,7 @@ The legacy app is a **live dependency**, not dead weight — do not treat it as 
 
 ### What gets sent
 
-The event is relayed **verbatim**, wrapped in the single-element JSON array that
-`POST /internal/hearing-results` expects (`requestBody` is an array of EventGridSchema events).
-Relaying rather than reshaping means the PCR service needs **no new contract** for this app — it
-receives exactly the request Event Grid itself would have made.
+`POST /internal/hearing-results`, the event verbatim in a single-element array:
 
 ```json
 [
@@ -104,8 +101,8 @@ receives exactly the request Event Grid itself would have made.
 ]
 ```
 
-The app models only `data.hearingId` (to skip pointless deliveries and correlate logs). Everything
-else — including fields the publisher adds later — passes through untouched.
+Only `data.hearingId` is read, for correlation. Everything else passes through untouched, so the PCR
+service needs no new contract — it receives exactly the request Event Grid would have made.
 
 ### Behaviour on failure
 
