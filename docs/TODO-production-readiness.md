@@ -144,6 +144,21 @@ serves every environment, and the earliest expiry is April 2028.
 and buys nothing while the secret works and nothing expires for years. Open item **7a** closed on that
 basis. The history exposure is a separate problem — see 4.5.
 
+**Post-cut-over cleanup: delete the `.local/` fallback.** `stageInternalCaBundle` falls back to
+`.local/internal_ca_certs.pem` when `CA_BUNDLE_SOURCE` is unset. Once deploys are pipeline-only that
+fallback has no remaining user: unit tests do not need a bundle, the integration tests talk to WireMock
+over **plain HTTP**, `local.settings.sample.json` sets `PCR_SERVICE_CA_BUNDLE_PATH` empty on purpose, and
+a laptop cannot reach the internal ingress anyway. Its only purpose was letting a human build a
+deployable zip — which pipeline-only deployment forbids.
+
+- [ ] After the ADO pipeline is proven (design doc §4.1), drop the fallback so the only sources are
+      `CA_BUNDLE_SOURCE` or nothing, delete `.local/`, and simplify `stageInternalCaBundle` from three
+      branches to two
+
+**Not before then.** While the STE app still runs a package put there by the Gradle route, the fallback is
+the only way to hand-build a zip if the pipeline is broken and something has to ship. Removing it early
+trades a real break-glass option for tidiness.
+
 ### 4.2 Secret scanning and push protection are off — P2
 Blocked by an enterprise policy (`HTTP 422 — Contact your enterprise owner`), and **still blocked after
 the repo went public**, so this is not a licensing question and cannot be fixed at repo level. The
