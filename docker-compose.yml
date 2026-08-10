@@ -25,7 +25,7 @@ services:
       FORWARD_MAX_ATTEMPTS: "2"
       FORWARD_RETRY_DELAY_IN_SECONDS: "0"
     volumes:
-      - ${FUNCTION_APP_STAGING_DIR:-./build/azure-functions/fa-ste-ccp0121-pcrrelay}:/home/site/wwwroot:ro
+      - ${FUNCTION_APP_STAGING_DIR:-./build/azure-functions/fa-pcrrelay}:/home/site/wwwroot:ro
       - ./build/functions-host-secrets:/azure-functions-host/Secrets
     ports:
       - "7071:80"

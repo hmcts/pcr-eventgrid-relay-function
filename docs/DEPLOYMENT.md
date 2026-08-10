@@ -80,7 +80,7 @@ is what changes when you move environment.
 | `PCR_SERVICE_INGESTION_ENDPOINT` | **varies** | `https://<ingress-host>/pcr/internal/hearing-results` — ingress prefix `/pcr` + the service's `POST /internal/hearing-results`. Taken from the built `api-cp-crime-results-pcr` artefact, **not** ADR-007, which documents a path that never shipped |
 | `FORWARD_MAX_ATTEMPTS` / `_RETRY_DELAY_IN_SECONDS` | tune | `3` / `2`. In-process retries sit *under* Event Grid's 30; keep `attempts × delay` well below the Function App timeout |
 | `PCR_SERVICE_CA_BUNDLE_PATH` | fixed | `/home/site/wwwroot/internal_ca_certs.pem` — where `stageInternalCaBundle` puts the bundle |
-| `WEBSITE_RUN_FROM_PACKAGE` | **managed** | a blob SAS URL today, left by the decommissioned Gradle route; becomes `1` at pipeline cut-over. **Do not hand-edit** — see §7.4 and the design doc §4.1 |
+| `WEBSITE_RUN_FROM_PACKAGE` | **managed** | a blob SAS URL today, left by the decommissioned Gradle route; becomes `1` at pipeline cut-over. **Do not hand-edit** — see §7.4 and the design doc §3.1 |
 
 Everything else is either defaulted in code or created by `functionapp create`. Do not set
 `AzureWebJobsStorage`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, `WEBSITE_CONTENT*`,
@@ -183,7 +183,7 @@ artefact. Design, prerequisites and the cut-over sequence: `docs/pipeline/hybrid
 
 Until the ADO pipeline exists, the STE app is still running a package put there by the old Gradle route.
 That is the state to cut over *from*, not a route to keep using — and note the cut-over can take the app
-down if sequenced wrongly, so read §4.1 of the design doc first.
+down if sequenced wrongly, so read §3.1 of the design doc first.
 
 ### 5.1 Verify the function registered
 

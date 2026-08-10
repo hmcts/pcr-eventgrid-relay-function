@@ -163,7 +163,7 @@ Only `PCR_SERVICE_INGESTION_ENDPOINT` is required. Also
 | Bytecode target | major version **69** = Java 25, on Temurin 25.0.2 |
 | Compiler strictness | passes `-Xlint:unchecked -Werror` |
 | Generated `function.json` | Correct `eventGridTrigger` binding, `direction: in`, `name: event` |
-| Deployable artefact | `build/azure-functions/fa-ste-ccp0121-pcrrelay.zip` — contains `function.json`, `host.json`, app jar, `lib/` |
+| Deployable artefact | `build/azure-functions/fa-pcrrelay.zip` — contains `function.json`, `host.json`, app jar, `lib/`, and the CA bundle. Named environment-neutrally: one artefact is promoted to every environment |
 | `lib/` contents | 7 runtime jars; `azure-functions-java-library` absent (pruned — see decision 9) |
 | Relayed body | Asserted byte-equal to the input envelope inside a 1-element array, against a real `HttpServer` |
 | Config drift | Every `SystemVariables` constant present in `local.settings.sample.json` |

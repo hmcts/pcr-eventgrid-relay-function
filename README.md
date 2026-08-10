@@ -460,7 +460,7 @@ There may be an ongoing deployment or your app setting has WEBSITE_RUN_FROM_PACK
 
 The seven Node siblings use `1`, so they were always on the Kudu route; this app is the odd one out and
 has to be cut over. Flipping the setting to `1` on its own would point the host at an **empty**
-`SitePackages` and leave the app with no code — see the design doc §4.1 for the safe sequence.
+`SitePackages` and leave the app with no code — see the design doc §3.1 for the safe sequence.
 
 That 409 is **permanent, not transient** — retrying will not clear it. An earlier revision of this
 README recommended `config-zip` as the primary route on the grounds that it matches the siblings; that

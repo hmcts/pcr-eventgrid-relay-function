@@ -1,6 +1,6 @@
 # Deployment pipeline — GitHub Actions builds, Azure DevOps deploys
 
-**Status:** accepted, not yet implemented. Blocked on a platform-team dependency (§6).
+**Status:** accepted, not yet implemented. Blocked on a platform-team dependency (§5).
 
 **Decision.** The build stays in GitHub Actions. Deployment moves to a thin Azure DevOps pipeline that
 pulls a published artefact and pushes it to a Function App. Promotion to each higher environment is a
@@ -16,32 +16,15 @@ gated re-run of that same pipeline against the same artefact.
 | **Deploy in ADO** | Governance. Service connections, environment approvals and the change-management audit trail are centralised in ADO for this estate. Not a technical preference — a technical read alone would keep deploys in GHA too |
 
 The cost of the split is a handoff: the artefact must exist somewhere ADO can fetch it, and the version
-must be passed across. §3 and §4 are about making that handoff boring.
+must be passed across. §2 and §3 are about making that handoff boring.
 
-## 2. What cannot be reused
-
-`service-cp-crime-results-pcr` already does GHA-build → ADO-deploy, and its wiring is the model for the
-GHA side. But **neither of its pipelines applies here**:
-
-| Pipeline | What it does | Why not for us |
-|---|---|---|
-| **460** `cp-gh-artifact-to-acr` | Maven artefact → container image → ACR | No image. A Functions zip is not containerised |
-| **434** | Helm release → AKS | No chart, no cluster |
-
-So the ADO side is a **new, Functions-capable pipeline**. That is the one thing this design cannot
-deliver from this repo (§6).
-
-What *is* reusable is the **trigger** mechanism: `hmcts/trigger-ado-pipeline@v2` and
-`hmcts/monitor-ado-pipeline@v1`, authenticated with `HMCTS_CP_ADO_PAT`. The artefact **download** is not
-reusable — see §3.1.
-
-## 3. Architecture
+## 2. Architecture
 
 ```
 PR                    GHA: build · unit + integration tests · verify zip          (no deploy)
 
 merge to main         GHA: build ONCE
-                        ├─ publish artefact (immutable, versioned)  ── see §3.1
+                        ├─ publish artefact (immutable, versioned)  ── see §2.1
                         └─ trigger ADO deploy pipeline → DEV                     (automatic)
 
 promote (button)      ADO: re-run the same pipeline, same artefact version
@@ -58,9 +41,16 @@ in DEV is bit-for-bit what reaches production. This already almost holds:
 |---|---|
 | CA bundle baked into the zip | ✅ one bundle carries live *and* non-live roots (verified) — environment-agnostic |
 | `PCR_SERVICE_INGESTION_ENDPOINT` | ✅ an app setting, not in the zip. The only value that genuinely varies |
-| `appSettings` in `build.gradle` | ❌ **breaks it.** The Gradle plugin asserts app settings and needs `appName`/`resourceGroup` at deploy time, coupling the artefact to one app. Must move to IaC (§5) |
+| `appSettings` in `build.gradle` | ❌ **breaks it.** The Gradle plugin asserts app settings and needs `appName`/`resourceGroup` at deploy time, coupling the artefact to one app. Must move to IaC (§4) |
+| the artefact's **name** | ✅ `fa-pcrrelay.zip` — environment-neutral. It was `fa-ste-ccp0121-pcrrelay.zip`, which named the artefact after one environment's app and quietly contradicted promoting it to others |
 
-### 3.1 Where the artefact lives
+The deploy target is a separate input (`deploy_app_name`), used only by the deploy step. Keeping the two
+apart matters more than it sounds: while one value served both, a stale copy of it in
+`docker-compose.yml` mounted a directory that no longer existed, and the symptom was a five-minute
+integration-test timeout that read as slowness. `gradle/docker-test.gradle` now exports
+`FUNCTION_APP_STAGING_DIR` from `functionAppName`, so compose cannot disagree with the build.
+
+### 2.1 Where the artefact lives
 
 **A GitHub Release asset**, versioned by `artefact-version-action`.
 
@@ -74,11 +64,11 @@ the Maven build tool; both repos are Gradle-only.) This repo does not do that, a
 `gradle/repositories.gradle` records the deliberate decision that there is **no `publishing` block**
 because the deliverable is a zip, not a library, and a zip in a Maven coordinate would be a contortion.
 
-So the new pipeline (§6) needs a **GitHub release download** step — a `GitHubRelease` task, or `gh`/`curl`
+So the new pipeline (§5) needs a **GitHub release download** step — a `GitHubRelease` task, or `gh`/`curl`
 with a PAT — rather than reusing 460's artefact-download plumbing. That is a few lines, and it is the
 price of not distorting how this repo publishes.
 
-### 3.2 Versioning — implemented
+### 2.2 Versioning — implemented
 
 Automated on every merge to main, computed as **the next patch after the highest existing tag**:
 
@@ -114,11 +104,11 @@ Two safety properties worth preserving if this is ever touched:
   and does nothing rather than replacing it. Silently swapping the bytes behind a version would destroy
   the guarantee that makes promotion meaningful.
 
-## 4. Changes needed in this repo
+## 3. Changes needed in this repo
 
 All in `.github/workflows/ci-build-deploy.yml` unless noted.
 
-1. ~~**Publish the zip as a release asset.**~~ **Done** — see §3.2. Every merge to main now tags, releases
+1. ~~**Publish the zip as a release asset.**~~ **Done** — see §2.2. Every merge to main now tags, releases
    and attaches the zip, so there is a durable immutable artefact per merge for ADO to pull.
 
 2. **Replace the `Deploy` job.** It currently uses `Azure/functions-action`, which is a Kudu zip deploy.
@@ -166,7 +156,7 @@ All in `.github/workflows/ci-build-deploy.yml` unless noted.
    owns deployment. GHA no longer needs Azure credentials at all, which removes the federated-credential
    work (TODO 1.3) from the critical path — ADO's existing service connections replace it.
 
-### 4.1 Cut-over: the one step that can take the app down
+### 3.1 Cut-over: the one step that can take the app down
 
 **Deploys are pipeline-only.** `azureFunctionsDeploy` from a laptop is decommissioned — the two
 mechanisms are mutually exclusive, because the Gradle plugin sets `WEBSITE_RUN_FROM_PACKAGE` to a blob
@@ -193,7 +183,7 @@ So sequence it with the deploy, not before it:
 Rollback if the cut-over fails: put `WEBSITE_RUN_FROM_PACKAGE` back to the SAS URL recorded above — the
 versioned blob still exists — and the app runs the previous package again.
 
-## 5. Terraform boundary
+## 4. Terraform boundary
 
 Terraform is **not needed to deploy** — a deploy is a zip push. It is needed for everything the deploy
 assumes already exists, all of which is hand-made today (TODO 3.3):
@@ -214,10 +204,13 @@ deploys happen on every merge. Coupling them makes every code change carry infra
 sibling apps were almost certainly provisioned by existing automation. Establish whether it exists and can
 adopt this app, and whether HMCTS already publishes Function App modules, before authoring one.
 
-## 6. Platform-team dependency
+## 5. Platform-team dependency
 
-This design cannot complete without a **new Functions-capable ADO pipeline**, since 460 and 434 do not
-apply (§2). The ask:
+This design cannot complete without a **new Functions-capable ADO pipeline**. The PCR service's existing
+ones do not apply: **460** (`cp-gh-artifact-to-acr`) turns a Maven artefact into a container image in ACR,
+and **434** does a Helm release to AKS — a Functions zip has no image, chart or cluster. What *is*
+reusable is the trigger mechanism, `hmcts/trigger-ado-pipeline@v2` and `hmcts/monitor-ado-pipeline@v1`
+with `HMCTS_CP_ADO_PAT`; the artefact download is not (§2.1). The ask:
 
 - A pipeline (likely in `hmcts/cpp-azure-devops-templates`, where `gh-artifact-to-acr.yaml` lives) that
   takes `env` and `artefactVersion`, downloads the named release asset from this repo, and runs an Azure
@@ -240,14 +233,14 @@ steps:
       appType: functionAppLinux
       appName: $(functionAppName)
       package: $(Pipeline.Workspace)/pcr-eventgrid-relay-function.zip
-      deploymentMethod: zipDeploy                  # needs WEBSITE_RUN_FROM_PACKAGE=1 (§4.1)
+      deploymentMethod: zipDeploy                  # needs WEBSITE_RUN_FROM_PACKAGE=1 (§3.1)
 ```
 
-## 7. Open questions
+## 6. Open questions
 
 - Which environments are in scope, and their `ccpNNNN` slots? Only STE-CCP0121 exists today; six DEV
   slots have topics, CCP0106 has none (TODO 1.4).
-- Release asset or GitHub Packages for the handoff (§3.1)?
+- Release asset or GitHub Packages for the handoff (§2.1)?
 - Does existing sibling automation provision these apps, and can it adopt this one (§5)?
 - ~~Does anything still need `azureFunctionsDeploy`?~~ **Resolved: no.** Deploys are pipeline-only. The
   task remains in the build for `azureFunctionsPackage`/`azureFunctionsRun`, but must not be used against
@@ -255,5 +248,5 @@ steps:
 - **App settings now have no owner.** The `azurefunctions { appSettings { … } }` block in `build.gradle`
   is only applied by `azureFunctionsDeploy`, so with that route gone nothing asserts
   `PCR_SERVICE_CA_BUNDLE_PATH` on deploy. It is set on the STE app today, but a new environment would come
-  up without it and fail every relay at the TLS handshake. This must move to Terraform (§5) before 1.4
+  up without it and fail every relay at the TLS handshake. This must move to Terraform (§4) before 1.4
   provisions anything — it is the most likely way a new environment silently breaks.

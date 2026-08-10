@@ -41,7 +41,11 @@ on:
       trigger_deploy:
         required: true
         type: boolean
-      function_app_name:
+      # The DEPLOY TARGET, not the artefact name. The artefact is named by build.gradle's
+      # functionAppName and is environment-neutral on purpose — one zip is promoted to every
+      # environment, so naming it after one app would be a lie. Kept separate after the two were
+      # conflated and a stale copy of this value in docker-compose.yml silently broke local runs.
+      deploy_app_name:
         required: false
         type: string
         default: fa-ste-ccp0121-pcrrelay
@@ -232,14 +236,20 @@ jobs:
         run: |
           ./gradlew azureFunctionsPackageZip \
             -DARTEFACT_VERSION="$ARTEFACT_VERSION" \
-            -DFUNCTION_APP_NAME="${{ inputs.function_app_name }}"
-          echo "zip_name=${{ inputs.function_app_name }}.zip" >> "$GITHUB_OUTPUT"
+            2>&1 | tail -5
+          # Discover what Gradle actually produced rather than reconstructing the filename here.
+          # Duplicating the name across build.gradle and this workflow is exactly the drift that broke
+          # the compose mount.
+          ZIP=$(ls build/azure-functions/*.zip)
+          test -f "$ZIP" || { echo "::error::no zip produced"; exit 1; }
+          echo "zip_name=$(basename "$ZIP")" >> "$GITHUB_OUTPUT"
+          echo "packaged $(basename "$ZIP")"
 
       # Guards the two things most likely to break silently: the generated binding, and the
       # worker-provided jar that must NOT be shipped (see pruneWorkerProvidedJars in build.gradle).
       - name: Verify packaged zip
         run: |
-          ZIP="build/azure-functions/${{ inputs.function_app_name }}.zip"
+          ZIP="build/azure-functions/${{ steps.package.outputs.zip_name }}"
           test -f "$ZIP" || { echo "::error::$ZIP was not produced"; exit 1; }
 
           echo "--- zip contents ---"
@@ -298,7 +308,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: function-app-zip
-          path: build/azure-functions/${{ inputs.function_app_name }}.zip
+          path: build/azure-functions/${{ steps.package.outputs.zip_name }}
           if-no-files-found: error
 
   # Tags and releases only AFTER Build has passed, and creates the tag as part of creating the release
@@ -416,14 +426,14 @@ jobs:
         if: steps.creds.outputs.configured == 'true'
         uses: Azure/functions-action@v1
         with:
-          app-name: ${{ inputs.function_app_name }}
+          app-name: ${{ inputs.deploy_app_name }}
           package: dist/${{ needs.Build.outputs.zip_name }}
 
       - name: Summarise
         if: always()
         run: |
           if [ "${{ steps.creds.outputs.configured }}" = "true" ]; then
-            echo "Deployed ${{ needs.Artefact-Version.outputs.artefact_version }} to ${{ inputs.function_app_name }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Deployed ${{ needs.Artefact-Version.outputs.artefact_version }} to ${{ inputs.deploy_app_name }}" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Deploy skipped — Azure credentials not configured. See ci-build-deploy.yml." >> "$GITHUB_STEP_SUMMARY"
           fi
