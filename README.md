@@ -11,24 +11,32 @@ topic: Hearing_Resulted  ──────▶  PrisonCourtRegisterHearingResult
 
 ## Why this app exists
 
-The accepted PCR ingestion design ([ADR-007 / AMP-892](../service-cp-crime-results-pcr/docs/designs/2026-07-29-pcr-eventgrid-webhook-ingestion-design.md))
-has Event Grid delivering **straight to a webhook** on `service-cp-crime-results-pcr`. That pulls an
-Event Grid-shaped surface into the service:
+**Event Grid cannot deliver to the PCR service directly.** Webhook delivery needs an endpoint Event
+Grid can reach over the public internet *and* whose TLS certificate it can validate against public
+CAs. The PCR ingestion API sits behind an internal ingress presenting a **private-CA certificate** —
+so it fails both tests, and no public CA chain exists that would let Event Grid trust it.
 
-- a public-ish HTTPS endpoint it owns and secures,
-- the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake, implemented by hand,
-- network isolation standing in for application-level auth (`security: []`).
+This relay closes that gap. It runs inside the VNet, so it can reach the internal ingress, and it adds
+the private CA to its own trust store at runtime (`AdditiveTrust`) — something Event Grid itself has no
+way to do. Event Grid delivers to a Function App it *can* validate; the PCR service receives an
+ordinary internal HTTP call.
 
-Putting this Function App in front moves that surface out of the service. The
-`@EventGridTrigger` binding performs the subscription-validation handshake itself, so **no handshake
-code is needed anywhere**, and the PCR service is left receiving an ordinary internal HTTP call.
+Two things fall out for free, which is why the accepted design
+([ADR-007 / AMP-892](../service-cp-crime-results-pcr/docs/designs/2026-07-29-pcr-eventgrid-webhook-ingestion-design.md))
+is better served this way than by the webhook-on-the-service it originally specified:
 
-> That handshake claim is **verified**, not assumed: `EventGridRelayIntegrationTest` sends a real
+- the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake is handled by the `@EventGridTrigger`
+  binding, so **no handshake code is needed anywhere**;
+- the Event Grid-shaped surface — a public HTTPS endpoint, and network isolation standing in for
+  application-level auth (`security: []`) — stays out of the PCR service entirely.
+
+> The handshake claim is **verified**, not assumed: `EventGridRelayIntegrationTest` sends a real
 > `Microsoft.EventGrid.SubscriptionValidationEvent` to the real Functions host and asserts it answers
 > `200 {"validationResponse": "<code>"}` without the event ever reaching the PCR service. If that
 > test is ever deleted, this design's main justification becomes unevidenced again.
 
-No durable task hub, no Redis, no orchestration state — this app holds no state at all.
+No durable task hub, no Redis, no orchestration state — this app holds no state at all. The private-CA
+trust it needs is explained in *Internal CA trust* below.
 
 ## What this does NOT replace
 

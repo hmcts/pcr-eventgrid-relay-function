@@ -19,12 +19,18 @@ beyond `data.hearingId`, it probably belongs in that service instead.
 
 ### Why it exists
 
-The accepted PCR ingestion design (ADR-007 / AMP-892, in
+**Event Grid cannot deliver to the PCR service directly.** Webhook delivery needs an endpoint Event
+Grid can reach publicly and whose TLS it can validate against public CAs; the PCR ingestion API is
+behind an internal ingress with a **private-CA certificate**, so it fails both. This relay runs in the
+VNet and adds that CA to its own trust store (`AdditiveTrust`) — something Event Grid cannot do. That
+is the load-bearing reason it exists; do not describe it as merely a convenience layer.
+
+Two consequences fall out for free, and the accepted design (ADR-007 / AMP-892, in
 `../service-cp-crime-results-pcr/docs/designs/2026-07-29-pcr-eventgrid-webhook-ingestion-design.md`)
-had Event Grid delivering directly to a webhook on the PCR service, which forced that service to own
-a public HTTPS endpoint, the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake, and network
-isolation in place of app auth. This Function App absorbs that surface: the `@EventGridTrigger`
-binding answers the validation handshake itself, so no handshake code exists in either codebase.
+had Event Grid delivering directly to a webhook on the PCR service instead: the `@EventGridTrigger`
+binding answers the `Microsoft.EventGrid.SubscriptionValidationEvent` handshake itself, so no handshake
+code exists in either codebase, and the public HTTPS endpoint plus network-isolation-in-place-of-app-auth
+surface stays out of the PCR service.
 
 ### What it does NOT do — correct this if you see it stated otherwise
 
