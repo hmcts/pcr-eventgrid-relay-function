@@ -282,12 +282,19 @@ In-process retries sit *under* Event Grid's retry policy, so total attempts mult
 
 Check whether these are still open before touching the related code:
 
-1. **`eventType` filtering.** The PCR spec allows only `Hearing_Resulted` and answers 400
-   (non-retryable) otherwise, but the topic also carries `Hearing_Resulted_Complex` (see
-   `Constants.HEARING_RESULTED_COMPLEX` and `HearingResultedDVLAEventGridTrigger/index.js:17` in
-   `cpp-context-azure-legalaidagency`). This app deliberately does not filter. The fix belongs in the
-   `pcr-hearing-results` subscription filter, not here — do not add client-side `eventType` filtering
-   without first confirming that decision.
+1. **`eventType` filtering — checked, not a live risk.** The PCR service answers 400 (non-retryable)
+   for an `eventType` it does not recognise, and the topic also carries `Hearing_Resulted_Complex`
+   (`Constants.HEARING_RESULTED_COMPLEX` in `cpp-context-azure-legalaidagency`). This app deliberately
+   does not filter, and that is safe: the topic already separates event types across subscriptions, so
+   `Hearing_Resulted_Complex` is delivered to a **different** subscription. Correctness therefore rests
+   on `egs-pcr-relay` being created with `--included-event-types Hearing_Resulted`, exactly like its
+   siblings — config, so re-verify it per environment (TODO 5.2). Do **not** add client-side filtering.
+
+   Two details that have each been got wrong once, from reading the design doc instead of the built
+   artefact: the 400 is a service-side branch in `HearingResultedWebhookService`, **not** schema
+   validation — in the shipped spec `eventType` is a plain string with `Hearing_Resulted` as an
+   *example*, not an enum. And the subscription is `egs-pcr-relay`; `pcr-hearing-results` is a name
+   from ADR-007 that was verified **not** to exist.
 2. **CI deploy credentials are not provisioned.** CI is GitHub Actions (see below) and builds green,
    but the `Deploy` job in `ci-build-deploy.yml` needs an Entra federated credential for this repo
    plus `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`. Without them it **skips with

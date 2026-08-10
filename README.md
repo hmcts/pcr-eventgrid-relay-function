@@ -121,33 +121,6 @@ In-process retries sit **under** Event Grid's own retry policy (exponential back
 so total attempts multiply. Keep `FORWARD_MAX_ATTEMPTS × FORWARD_RETRY_DELAY_IN_SECONDS` comfortably
 below the Function App timeout.
 
-## `eventType` filtering — resolved
-
-The PCR service answers **400 (non-retryable)** for an `eventType` it does not recognise — its
-`HearingResultedWebhookService` branches on the value. Since this app relays whatever the subscription
-delivers and does **not** filter on `eventType`, that looked like a live risk: the topic also carries
-`Hearing_Resulted_Complex` (`Constants.HEARING_RESULTED_COMPLEX` in the legacy code).
-
-(The rejection is a service-side branch, not schema validation — in the shipped spec
-`HearingResultedWebhookEvent.eventType` is a plain string with `Hearing_Resulted` only as an *example*,
-not an enum. An earlier draft of this README claimed an enum, from the design doc rather than the
-built artefact.)
-
-**Checked against the real topic (`eg-ste-ccp0121-hearingres`) — the risk does not apply.** Event types
-are already separated across subscriptions:
-
-```
-egs-prison-court       AzureFunction   includedEventTypes = [Hearing_Resulted]
-egs-court-register     AzureFunction   includedEventTypes = [Hearing_Resulted]
-egs-laa                AzureFunction   includedEventTypes = [Hearing_Resulted]
-egs-nowsce-complex     StorageQueue    includedEventTypes = [Hearing_Resulted_Complex]   ← separate
-egs-sjp-hearing-resulted  AzureFunction  includedEventTypes = [SJP_Hearing_Resulted]
-```
-
-`Hearing_Resulted_Complex` goes to a different subscription entirely. So this app's subscription simply
-needs `--included-event-types Hearing_Resulted`, exactly like its seven siblings, and no client-side
-filtering is warranted. See the deployment section.
-
 ## Configuration
 
 Copy `Azure/local.settings.sample.json` to `local.settings.json` in the repo root (git-ignored — it
