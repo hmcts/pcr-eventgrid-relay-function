@@ -21,7 +21,6 @@ parameters:
   type: string
   default: ste
   values:
-  - dev
   - sit
   - ste
   - prp
