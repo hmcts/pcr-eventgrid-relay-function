@@ -130,16 +130,32 @@ All in `.github/workflows/ci-build-deploy.yml` unless noted.
    owns deployment. GHA no longer needs Azure credentials at all, which removes the federated-credential
    work (TODO 1.3) from the critical path — ADO's existing service connections replace it.
 
-### 4.1 Prerequisite that will otherwise bite
+### 4.1 Cut-over: the one step that can take the app down
 
-**`WEBSITE_RUN_FROM_PACKAGE` on `fa-ste-ccp0121-pcrrelay` is currently a blob SAS URL**, set by the
-`azureFunctionsDeploy` runs done from a laptop. Any Kudu zip deploy against it — which is what both
-`Azure/functions-action` and ADO's `AzureFunctionApp@2` do — fails with a **permanent 409**, not a
-transient one (`DEPLOYMENT.md` §7.4).
+**Deploys are pipeline-only.** `azureFunctionsDeploy` from a laptop is decommissioned — the two
+mechanisms are mutually exclusive, because the Gradle plugin sets `WEBSITE_RUN_FROM_PACKAGE` to a blob
+SAS URL and Kudu zip deploy refuses to run while it holds a URL (permanent 409, `DEPLOYMENT.md` §7.4).
 
-Before the first automated deploy: set `WEBSITE_RUN_FROM_PACKAGE=1`. Consequence, and it is not optional
-— `azureFunctionsDeploy` from a laptop stops being available, because it sets the setting back to a SAS
-URL. One mechanism or the other, not both.
+The cut-over is **not** a preparatory step that can be done early:
+
+```
+today   WEBSITE_RUN_FROM_PACKAGE = https://…blob…/<versioned-package>?<sas>   ← app runs from here
+        Kudu SitePackages = EMPTY. This app has only ever been deployed by the Gradle plugin.
+
+set it to 1 on its own  →  host looks in SitePackages  →  nothing there  →  app has NO CODE
+```
+
+So sequence it with the deploy, not before it:
+
+1. The new ADO pipeline exists and is proven against a **throwaway app first**, not this one.
+2. Then, in one operation: set `WEBSITE_RUN_FROM_PACKAGE=1` and immediately run the pipeline's zip
+   deploy. `AzureFunctionApp@2` with `zipDeploy` populates `SitePackages` and manages the setting itself,
+   so in practice letting the pipeline's first run do both is the safest form.
+3. Expect a short window with no code, and do it outside any period when events matter. Deleting the
+   Event Grid subscription first (`DEPLOYMENT.md` §8) stops deliveries being lost during it.
+
+Rollback if the cut-over fails: put `WEBSITE_RUN_FROM_PACKAGE` back to the SAS URL recorded above — the
+versioned blob still exists — and the app runs the previous package again.
 
 ## 5. Terraform boundary
 
@@ -197,5 +213,11 @@ steps:
   slots have topics, CCP0106 has none (TODO 1.4).
 - Release asset or GitHub Packages for the handoff (§3.1)?
 - Does existing sibling automation provision these apps, and can it adopt this one (§5)?
-- Does anything still need `azureFunctionsDeploy`, given §4.1 makes it mutually exclusive with automated
-  deploys? Suggest keeping it for local `azureFunctionsRun` only.
+- ~~Does anything still need `azureFunctionsDeploy`?~~ **Resolved: no.** Deploys are pipeline-only. The
+  task remains in the build for `azureFunctionsPackage`/`azureFunctionsRun`, but must not be used against
+  a real app once cut over.
+- **App settings now have no owner.** The `azurefunctions { appSettings { … } }` block in `build.gradle`
+  is only applied by `azureFunctionsDeploy`, so with that route gone nothing asserts
+  `PCR_SERVICE_CA_BUNDLE_PATH` on deploy. It is set on the STE app today, but a new environment would come
+  up without it and fail every relay at the TLS handshake. This must move to Terraform (§5) before 1.4
+  provisions anything — it is the most likely way a new environment silently breaks.

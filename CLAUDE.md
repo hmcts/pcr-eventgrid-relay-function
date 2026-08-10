@@ -103,10 +103,11 @@ toolchain, same `gradle/*.gradle` convention-script split, same `.github/pmd-rul
 ./gradlew azureFunctionsPackage      # staging dir: build/azure-functions/<appName>/
 ./gradlew azureFunctionsPackageZip   # deployable zip: build/azure-functions/<appName>.zip
 ./gradlew azureFunctionsRun          # run locally (needs local.settings.json in the repo root)
-./gradlew azureFunctionsDeploy       # THE deploy route; needs `az login` (auth type azure_cli)
-                                     #   NOT config-zip: the app's WEBSITE_RUN_FROM_PACKAGE is a
-                                     #   blob SAS URL set by this plugin, so Kudu ZipDeploy 409s
-                                     #   permanently. See README "Why not config-zip".
+./gradlew azureFunctionsDeploy       # DECOMMISSIONED - do not run against a real app.
+                                     #   Deploys are pipeline-only (docs/pipeline/hybrid-deploy).
+                                     #   This plugin sets WEBSITE_RUN_FROM_PACKAGE to a blob SAS
+                                     #   URL, which makes the pipeline's Kudu zip deploy 409
+                                     #   permanently. The two mechanisms are mutually exclusive.
 ```
 
 Requires a **JDK 25** — the Gradle toolchain pins `JavaLanguageVersion.of(25)`. Compilation also runs
