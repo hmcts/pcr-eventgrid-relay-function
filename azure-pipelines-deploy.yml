@@ -52,7 +52,16 @@ parameters:
   default: false
 
 variables:
+# azureServiceConnection is genuinely platform-scoped (nonlive vs live) — one value covers
+# every environment on that platform.
 - template: azure-pipeline-variables/${{ parameters.platform }}.yml
+# pcrServiceIngestionEndpoint/deadletterStorageResourceId are NOT platform-scoped — dev, sit,
+# and ste each have a different real ingress host (confirmed the hard way earlier: ns-dev-amp-01
+# turned out to secretly back steccm64, so nothing about these values can be assumed to match
+# across environments). A single flat value per platform silently breaks every environment
+# except whichever one it was last set for. parameters.environment resolves at template-expansion
+# time same as parameters.platform does, so this can split the same way.
+- template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
 
 resources:
   repositories:

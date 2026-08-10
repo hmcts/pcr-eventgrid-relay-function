@@ -1,0 +1,8 @@
+variables:
+# Confirmed working — same URL tested repeatedly this session against the pcr-data pod in
+# ns-dev-amp-01. No relay is deployed to devccm01/ccp0101 yet (DEPLOYMENT.md only lists
+# STE-CCP0121), but the endpoint value is already known from the Redis-fix verification work.
+- name: pcrServiceIngestionEndpoint
+  value: "https://devamp01.ingress01.dev.nl.cjscp.org.uk/pcr/internal/hearing-results"
+- name: deadletterStorageResourceId
+  value: "/subscriptions/e6b5053b-4c38-4475-a835-a025aeb3d8c7/resourceGroups/RG-DEV-CCP0101-HEARINGRES/providers/Microsoft.Storage/storageAccounts/sadevccp0101hearingres"
