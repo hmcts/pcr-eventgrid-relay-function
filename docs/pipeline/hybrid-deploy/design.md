@@ -31,8 +31,9 @@ GHA side. But **neither of its pipelines applies here**:
 So the ADO side is a **new, Functions-capable pipeline**. That is the one thing this design cannot
 deliver from this repo (§6).
 
-What *is* reusable is the handoff mechanism: `hmcts/trigger-ado-pipeline@v2` and
-`hmcts/monitor-ado-pipeline@v1`, authenticated with `HMCTS_CP_ADO_PAT`.
+What *is* reusable is the **trigger** mechanism: `hmcts/trigger-ado-pipeline@v2` and
+`hmcts/monitor-ado-pipeline@v1`, authenticated with `HMCTS_CP_ADO_PAT`. The artefact **download** is not
+reusable — see §3.1.
 
 ## 3. Architecture
 
@@ -61,21 +62,21 @@ in DEV is bit-for-bit what reaches production. This already almost holds:
 
 ### 3.1 Where the artefact lives
 
-Two options. Both are immutable and versioned; they differ in how much plumbing already exists.
-
-| | GitHub Release asset | GitHub Packages (Maven-shaped) |
-|---|---|---|
-| Publish | `gh release create` / upload asset | `publish` to GitHub Packages |
-| ADO pulls with | `GitHubRelease` task or `curl` + PAT | the same `GROUP_ID` / `ARTIFACT_ID` / `ARTIFACT_VERSION` shape pipeline 460 already consumes |
-| Estate consistency | new pattern for this estate | matches what CPP ADO tooling already speaks |
-| Simplicity | higher | lower (a zip in a Maven coordinate is a slight abuse) |
-
-**Chosen: release asset**, for legibility — a human can see exactly what shipped, and the download needs
-no Maven plumbing. Flagging the alternative because if the platform team would rather reuse existing
-artefact-download tooling verbatim, publishing to GitHub Packages avoids writing a new download step.
+**A GitHub Release asset**, versioned by `artefact-version-action`.
 
 Actions artifacts (`actions/upload-artifact`, what the Build job produces today) are **not** suitable:
 they are run-scoped and expire (90 days by default), so there is nothing durable to promote.
+
+One consequence for the ADO side. `service-cp-crime-results-pcr` hands ADO pipeline 460 a set of
+**Maven coordinates** — `GROUP_ID` / `ARTIFACT_ID` / `ARTIFACT_VERSION` — because it applies
+`maven-publish` and pushes its jar to GitHub Packages. (That is a repository *format*, nothing to do with
+the Maven build tool; both repos are Gradle-only.) This repo does not do that, and should not start:
+`gradle/repositories.gradle` records the deliberate decision that there is **no `publishing` block**
+because the deliverable is a zip, not a library, and a zip in a Maven coordinate would be a contortion.
+
+So the new pipeline (§6) needs a **GitHub release download** step — a `GitHubRelease` task, or `gh`/`curl`
+with a PAT — rather than reusing 460's artefact-download plumbing. That is a few lines, and it is the
+price of not distorting how this repo publishes.
 
 ## 4. Changes needed in this repo
 
