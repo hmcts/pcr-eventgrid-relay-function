@@ -66,7 +66,11 @@ jobs:
   # Control: bump the minor or major by hand-tagging (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
   # Automatic patches continue from whatever the highest tag is, so a hand-tag is respected immediately
   # and needs no change here.
-  Version:
+  #
+  # The job name must stay `Artefact-Version`: the `main` ruleset requires a status check called
+  # `ci-draft / Artefact-Version`. Renaming the job silently makes that check unsatisfiable, and the
+  # symptom is a PR stuck on BLOCKED with every check green — nothing points at the cause.
+  Artefact-Version:
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.environment }}
@@ -126,7 +130,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   Build:
-    needs: [Version]
+    needs: [Artefact-Version]
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.environment }}
@@ -197,7 +201,7 @@ jobs:
 
       - name: Gradle build
         env:
-          ARTEFACT_VERSION: ${{ needs.Version.outputs.artefact_version }}
+          ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
         run: |
           echo "Building with ARTEFACT_VERSION=$ARTEFACT_VERSION"
           ./gradlew build -DARTEFACT_VERSION="$ARTEFACT_VERSION"
@@ -224,7 +228,7 @@ jobs:
       - name: Package Azure Functions zip
         id: package
         env:
-          ARTEFACT_VERSION: ${{ needs.Version.outputs.artefact_version }}
+          ARTEFACT_VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
         run: |
           ./gradlew azureFunctionsPackageZip \
             -DARTEFACT_VERSION="$ARTEFACT_VERSION" \
@@ -308,8 +312,8 @@ jobs:
   # runs, so the `release: published` trigger stays for human-made releases only. Do not "fix" that by
   # switching to a PAT without thinking about the loop it would create.
   Publish-Release:
-    needs: [Version, Build]
-    if: ${{ needs.Version.outputs.publish == 'true' }}
+    needs: [Artefact-Version, Build]
+    if: ${{ needs.Artefact-Version.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write      # create the tag and the release
@@ -323,8 +327,8 @@ jobs:
       - name: Create tag and release with the zip attached
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.Version.outputs.tag }}
-          VERSION: ${{ needs.Version.outputs.artefact_version }}
+          TAG: ${{ needs.Artefact-Version.outputs.tag }}
+          VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
           ZIP: dist/${{ needs.Build.outputs.zip_name }}
         run: |
           set -euo pipefail
@@ -364,7 +368,7 @@ jobs:
   # Functions-capable pipeline.
   # ==========================================================================================
   Deploy:
-    needs: [Version, Build]
+    needs: [Artefact-Version, Build]
     if: ${{ inputs.trigger_deploy }}
     runs-on: ubuntu-latest
     environment:
@@ -414,7 +418,7 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.creds.outputs.configured }}" = "true" ]; then
-            echo "Deployed ${{ needs.Version.outputs.artefact_version }} to ${{ inputs.function_app_name }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Deployed ${{ needs.Artefact-Version.outputs.artefact_version }} to ${{ inputs.function_app_name }}" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Deploy skipped — Azure credentials not configured. See ci-build-deploy.yml." >> "$GITHUB_STEP_SUMMARY"
           fi
