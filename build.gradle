@@ -134,7 +134,7 @@ def caBundleSourceSetting = (System.getProperty('CA_BUNDLE_SOURCE')
 def caBundleFromInfra = null
 if (caBundleSourceSetting) {
   final File candidate = new File(caBundleSourceSetting)
-  caBundleFromInfra = candare idate.isAbsolute() ? candidate
+  caBundleFromInfra = candidate.isAbsolute() ? candidate
           : layout.projectDirectory.file(caBundleSourceSetting).asFile
 }
 
