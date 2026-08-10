@@ -434,30 +434,33 @@ account key to build `AzureWebJobsStorage`. Read-only or Website-Contributor-onl
 
 ### Deploy
 
-**Use the Gradle plugin. `az functionapp deployment source config-zip` does not work on this app.**
+**Deploys are pipeline-only.** GitHub Actions builds and publishes the artefact; an Azure DevOps pipeline
+deploys it, and promotion to a higher environment is a gated re-run of that pipeline against the same
+artefact. See `docs/pipeline/hybrid-deploy/design.md` and `docs/DEPLOYMENT.md`.
 
-```bash
-az login                                        # auth type is azure_cli
-./gradlew azureFunctionsDeploy -DARTEFACT_VERSION=0.0.2
-```
+`./gradlew azureFunctionsDeploy` is **decommissioned** — do not run it against a real app. The Gradle
+tasks remain for `azureFunctionsPackage` and local `azureFunctionsRun`.
 
-#### Why not `config-zip`
+#### Why the two mechanisms cannot coexist
 
-The two mechanisms are mutually exclusive, and this app is already committed to the plugin's:
+`WEBSITE_RUN_FROM_PACKAGE` decides where the host loads code from, and the two routes set it
+incompatibly:
 
-| App | `WEBSITE_RUN_FROM_PACKAGE` | Deploy with |
+| Route | `WEBSITE_RUN_FROM_PACKAGE` | Code loaded from |
 |---|---|---|
-| `fa-ste-ccp0121-pcrrelay` (this one) | a **blob SAS URL** | `azureFunctionsDeploy` |
-| the seven Node siblings | `1` | `config-zip` |
+| `azureFunctionsDeploy` (decommissioned) | a **blob SAS URL** | that fixed blob |
+| Kudu zip deploy — pipeline, `functions-action`, `config-zip` | `1` | Kudu's `SitePackages` |
 
-`azureFunctionsDeploy` uploads the package to `sasteccp0121hearingres` and points
-`WEBSITE_RUN_FROM_PACKAGE` at a SAS URL for that blob. Once the setting holds a URL, the app runs from
-that fixed blob and Kudu ZipDeploy has nothing to update, so `config-zip` fails with:
+While the setting holds a URL there is nothing for Kudu to update, so a zip deploy fails **permanently**:
 
 ```
 Deployment endpoint responded with status code 409
 There may be an ongoing deployment or your app setting has WEBSITE_RUN_FROM_PACKAGE.
 ```
+
+The seven Node siblings use `1`, so they were always on the Kudu route; this app is the odd one out and
+has to be cut over. Flipping the setting to `1` on its own would point the host at an **empty**
+`SitePackages` and leave the app with no code — see the design doc §4.1 for the safe sequence.
 
 That 409 is **permanent, not transient** — retrying will not clear it. An earlier revision of this
 README recommended `config-zip` as the primary route on the grounds that it matches the siblings; that

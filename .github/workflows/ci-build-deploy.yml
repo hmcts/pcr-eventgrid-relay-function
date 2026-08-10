@@ -2,9 +2,10 @@ name: CI Build and Deploy
 
 # Reusable workflow, called by ci-draft.yml (PR / push to main) and ci-released.yml (release).
 #
-# Adapted from service-cp-crime-results-pcr's ci-build-publish.yml. The Artefact-Version and Build
-# jobs mirror it closely; everything downstream is deliberately different, because this repo ships an
-# **Azure Functions deployment zip**, not a Spring Boot container:
+# Adapted from service-cp-crime-results-pcr's ci-build-publish.yml. The Build job mirrors it closely;
+# versioning and everything downstream are deliberately different, because this repo ships an
+# **Azure Functions deployment zip**, not a Spring Boot container (and see the Version job on why
+# hmcts/artefact-version-action is not used):
 #
 #   PCR service                                    this repo
 #   -----------                                    ---------
@@ -37,10 +38,6 @@ on:
         required: true
         type: string
         default: dev
-      is_release:
-        required: false
-        type: boolean
-        default: false
       trigger_deploy:
         required: true
         type: boolean
@@ -54,25 +51,83 @@ on:
         default: RG-STE-CCP0121-HEARINGRES
 
 jobs:
+  # Version is computed as "the NEXT patch after the highest existing tag", not as a suffix on the
+  # latest one. That is the whole point of not using hmcts/artefact-version-action here, and it is worth
+  # spelling out because the divergence from every sibling repo is deliberate:
+  #
+  #   the action gives   0.0.1-<sha>   for a build made AFTER v0.0.1 was released
+  #   semver says        0.0.1-<sha> < 0.0.1
+  #   so the newer artefact sorts BELOW the release it came after — wrong for a promotion pipeline,
+  #   where "which of these two versions is newer" has to have an obvious answer.
+  #
+  # Computing the next patch instead gives 0.0.2 on main and 0.0.2-<sha> on a PR, both of which sort
+  # above v0.0.1 and in the right order relative to each other.
+  #
+  # Control: bump the minor or major by hand-tagging (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
+  # Automatic patches continue from whatever the highest tag is, so a hand-tag is respected immediately
+  # and needs no change here.
+  #
+  # The job name must stay `Artefact-Version`: the `main` ruleset requires a status check called
+  # `ci-draft / Artefact-Version`. Renaming the job silently makes that check unsatisfiable, and the
+  # symptom is a PR stuck on BLOCKED with every check green — nothing points at the cause.
   Artefact-Version:
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.environment }}
     outputs:
-      artefact_version: ${{ inputs.is_release && steps.artefact.outputs.release_version || steps.artefact.outputs.draft_version }}
+      artefact_version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Generate Artefact Version
-        id: artefact
-        uses: hmcts/artefact-version-action@v1
-        with:
-          release: ${{ inputs.is_release }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute next version
+        id: v
+        run: |
+          set -euo pipefail
+          # --force because actions/checkout can leave a stale tag ref for a re-created tag.
+          git fetch --tags --force --quiet
+
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          LATEST=${LATEST:-v0.0.0}
+          IFS=. read -r MAJOR MINOR PATCH <<<"${LATEST#v}"
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          case "${{ github.event_name }}:${{ github.ref }}" in
+            release:*)
+              # Someone hand-tagged and published a release, typically to take a deliberate minor or
+              # major. The released tag IS the version — do not compute one. The release already
+              # exists, so Publish-Release uploads the asset to it rather than creating it.
+              TAG="${{ github.ref_name }}"
+              VERSION="${TAG#v}"
+              PUBLISH=true
+              ;;
+            push:refs/heads/main)
+              TAG="v$NEXT"
+              VERSION="$NEXT"
+              PUBLISH=true
+              ;;
+            *)
+              # A PR. Build a pre-release of the version this would become, so the artefact is
+              # traceable and sorts correctly, but never publish or deploy it.
+              TAG="v$NEXT"
+              VERSION="$NEXT-$(git rev-parse --short HEAD)"
+              PUBLISH=false
+              ;;
+          esac
+
+          echo "latest tag : $LATEST"
+          echo "version    : $VERSION"
+          echo "tag        : $TAG"
+          echo "publish    : $PUBLISH"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "publish=$PUBLISH"
+          } >> "$GITHUB_OUTPUT"
 
   Build:
     needs: [Artefact-Version]
@@ -245,6 +300,57 @@ jobs:
           name: function-app-zip
           path: build/azure-functions/${{ inputs.function_app_name }}.zip
           if-no-files-found: error
+
+  # Tags and releases only AFTER Build has passed, and creates the tag as part of creating the release
+  # rather than as a separate earlier step. That ordering is deliberate: tagging first would leave an
+  # orphan tag behind every failed build, and the next run would then compute its next-patch from a tag
+  # that never shipped anything.
+  #
+  # `gh release create` creates the tag itself, at --target, so there is no separate `git push --tags`.
+  #
+  # This does NOT re-trigger ci-released.yml. Events raised by GITHUB_TOKEN do not start new workflow
+  # runs, so the `release: published` trigger stays for human-made releases only. Do not "fix" that by
+  # switching to a PAT without thinking about the loop it would create.
+  Publish-Release:
+    needs: [Artefact-Version, Build]
+    if: ${{ needs.Artefact-Version.outputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the tag and the release
+    steps:
+      - name: Download the built zip
+        uses: actions/download-artifact@v8
+        with:
+          name: function-app-zip
+          path: dist
+
+      - name: Create tag and release with the zip attached
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.Artefact-Version.outputs.tag }}
+          VERSION: ${{ needs.Artefact-Version.outputs.artefact_version }}
+          ZIP: dist/${{ needs.Build.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          test -f "$ZIP" || { echo "::error::$ZIP missing — nothing to publish"; exit 1; }
+
+          NOTES=$(printf 'Azure Functions deployment package `%s`.\n\nCommit: `%s`\nPromote by deploying this asset to the target environment — do not rebuild.' "$VERSION" "$GITHUB_SHA")
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # Normal path: a merge to main. Creates the tag at --target as part of the release, so a
+            # failed Build never leaves an orphan tag behind.
+            gh release create "$TAG" "$ZIP" --target "$GITHUB_SHA" --title "$TAG" --notes "$NOTES"
+            echo "Created $TAG with $(basename "$ZIP")" >> "$GITHUB_STEP_SUMMARY"
+          elif gh release view "$TAG" --json assets --jq '.assets[].name' | grep -q .; then
+            # A re-run of an already-published version. Never replace a published artefact with a
+            # different build — that would break the promise that a version is immutable, which is the
+            # whole basis of promoting one artefact through environments.
+            echo "::warning::$TAG already has an asset — leaving the published artefact untouched."
+          else
+            # A human created the release by hand (a milestone tag); attach this build to it.
+            gh release upload "$TAG" "$ZIP"
+            echo "Attached $(basename "$ZIP") to existing $TAG" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ==========================================================================================
   # ACTION REQUIRED before this can deploy.

@@ -80,7 +80,7 @@ is what changes when you move environment.
 | `PCR_SERVICE_INGESTION_ENDPOINT` | **varies** | `https://<ingress-host>/pcr/internal/hearing-results` — ingress prefix `/pcr` + the service's `POST /internal/hearing-results`. Taken from the built `api-cp-crime-results-pcr` artefact, **not** ADR-007, which documents a path that never shipped |
 | `FORWARD_MAX_ATTEMPTS` / `_RETRY_DELAY_IN_SECONDS` | tune | `3` / `2`. In-process retries sit *under* Event Grid's 30; keep `attempts × delay` well below the Function App timeout |
 | `PCR_SERVICE_CA_BUNDLE_PATH` | fixed | `/home/site/wwwroot/internal_ca_certs.pem` — where `stageInternalCaBundle` puts the bundle |
-| `WEBSITE_RUN_FROM_PACKAGE` | **managed** | a blob SAS URL, set by `azureFunctionsDeploy`. **Do not hand-edit** — see §7.4 |
+| `WEBSITE_RUN_FROM_PACKAGE` | **managed** | a blob SAS URL today, left by the decommissioned Gradle route; becomes `1` at pipeline cut-over. **Do not hand-edit** — see §7.4 and the design doc §4.1 |
 
 Everything else is either defaulted in code or created by `functionapp create`. Do not set
 `AzureWebJobsStorage`, `APPLICATIONINSIGHTS_CONNECTION_STRING`, `WEBSITE_CONTENT*`,
@@ -151,8 +151,9 @@ az functionapp config appsettings set -g $RG -n $APP --settings \
 ```
 
 `PCR_SERVICE_CA_BUNDLE_PATH` is **essential**: without it the bundle ships but nothing reads it, giving a
-TLS failure indistinguishable from having no bundle at all. `azureFunctionsDeploy` reasserts it, but a
-hand-created app will not have it.
+TLS failure indistinguishable from having no bundle at all. Nothing reasserts it once the Gradle route is
+gone — the `appSettings` block in `build.gradle` was the only thing that did — so it must be set here, or
+better, owned by Terraform.
 
 ### 4.4 Confirm the CA bundle is present
 
@@ -171,22 +172,18 @@ unzip -l build/azure-functions/*.zip | grep internal_ca_certs.pem
 
 ## 5. Deploy
 
-**Use the Gradle plugin.** `az functionapp deployment source config-zip` does not work on this app —
-see §7.4.
+**Deploys are pipeline-only.** GitHub Actions builds and publishes the artefact; an Azure DevOps pipeline
+deploys it, and promotion to a higher environment is a gated re-run of that pipeline against the same
+artefact. Design, prerequisites and the cut-over sequence: `docs/pipeline/hybrid-deploy/design.md`.
 
-```bash
-az login
-./gradlew azureFunctionsDeploy \
-  -DARTEFACT_VERSION=0.0.2 \
-  -DFUNCTION_APP_NAME=$APP \
-  -DFUNCTION_RESOURCE_GROUP=$RG \
-  -DFUNCTION_APP_SERVICE_PLAN=$PLAN
-```
+> **Do not run `./gradlew azureFunctionsDeploy` against a real app.** It is decommissioned. It sets
+> `WEBSITE_RUN_FROM_PACKAGE` to a blob SAS URL, which makes the pipeline's Kudu zip deploy fail with a
+> **permanent** 409 (§7.4) — the two mechanisms cannot coexist on one app. The Gradle tasks remain for
+> `azureFunctionsPackage` and local `azureFunctionsRun` only.
 
-This packages, stages the CA bundle, prunes the worker-provided jar, uploads to blob storage and points
-`WEBSITE_RUN_FROM_PACKAGE` at a SAS URL. It also applies the `appSettings` block, so
-`PCR_SERVICE_CA_BUNDLE_PATH` is reasserted every deploy. Omit the `-D` overrides for the STE-CCP0121
-defaults.
+Until the ADO pipeline exists, the STE app is still running a package put there by the old Gradle route.
+That is the state to cut over *from*, not a route to keep using — and note the cut-over can take the app
+down if sequenced wrongly, so read §4.1 of the design doc first.
 
 ### 5.1 Verify the function registered
 
@@ -306,12 +303,13 @@ so Kudu ZipDeploy has nothing to update. The siblings use `WEBSITE_RUN_FROM_PACK
 # fastest: stop processing without changing anything
 az functionapp stop -g $RG -n $APP
 
-# or redeploy a known-good version
-./gradlew azureFunctionsDeploy -DARTEFACT_VERSION=<previous> -DFUNCTION_APP_NAME=$APP -DFUNCTION_RESOURCE_GROUP=$RG
-
 # or detach the trigger, leaving the app deployed
 az eventgrid event-subscription delete --name egs-pcr-relay --source-resource-id "$TOPIC"
 ```
+
+To roll back the **code**, re-run the deploy pipeline against the previous artefact version — that is
+what build-once-deploy-many buys. While the app still runs from the old Gradle route, the equivalent is to
+point `WEBSITE_RUN_FROM_PACKAGE` back at the previous versioned blob, which still exists.
 
 Stopping the app does **not** stop Event Grid retrying: deliveries keep failing for up to 24h across 30
 attempts, and with no dead-letter destination those events are lost. Deleting the subscription is the
