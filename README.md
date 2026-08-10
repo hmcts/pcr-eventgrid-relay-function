@@ -195,27 +195,6 @@ infrastructure was *supposed* to supply one would ship something nobody reviewed
 string, so the build also rejects a file containing no `BEGIN CERTIFICATE` block, and both
 `verifyStagedApp` and the CI zip check assert the bundle actually reached the artefact.
 
-### The repository no longer tracks any certificate
-
-No certificate material is checked in. `.gitignore` excludes `.local/` and the bare filename
-`internal_ca_certs.pem` at any path, the latter specifically so the bundle cannot drift back to the
-repo root where it used to live.
-
-**This does not undo the past.** The bundle *was* committed for a period, so it remains in git history
-and in every existing clone and fork. Two consequences:
-
-- **The repo must stay private for now.** It was public initially, and the certificates were
-  deliberately kept out of it: they carry internal domain names, and the PCR design doc redacts the
-  equivalent hostname as "not for a public repo". Going private was a decision taken specifically to
-  allow committing the bundle, and it has costs — code scanning on private repos needs GitHub Advanced
-  Security, and Actions minutes bill against the org quota. Returning to public needs a **history
-  rewrite**, tracked in TODO 4.1.
-- **Treat those CAs as exposed to anyone who has ever cloned the repo.** If that is not acceptable,
-  the CAs need rotating rather than merely un-committing.
-
-Until the `PCR_INTERNAL_CA_BUNDLE` secret is set, **CA rotation is still a manual step** for whoever
-deploys — they need the current bundle at `.local/internal_ca_certs.pem`.
-
 ### What is left to do
 
 The build and CI wiring for an infrastructure-supplied bundle is **in place**:
