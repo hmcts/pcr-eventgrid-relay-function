@@ -31,6 +31,14 @@ dockerCompose {
 
     useDockerComposeV2 = true
     dockerExecutable = 'docker'
+
+    // Tell compose where the staged app actually is, rather than letting docker-compose.yml guess.
+    // The path is derived from functionAppName, so renaming the artefact cannot silently leave compose
+    // mounting a directory that no longer exists — which produces an empty wwwroot, "0 functions found"
+    // from the host, and a five-minute readiness timeout that looks like slowness rather than a
+    // mismatch. The compose default is only a fallback for running `docker compose up` by hand.
+    environment.put('FUNCTION_APP_STAGING_DIR',
+            layout.buildDirectory.dir("azure-functions/${functionAppName}").get().asFile.absolutePath)
 }
 
 tasks.register('integrationTest', Test) {

@@ -2,28 +2,15 @@ plugins {
   id 'java'
   id 'jacoco'
   id 'io.github.ben-manes.versions' version '0.59.0'
-  // SBOM for the CodeQL workflow's supply-chain artefact, as in service-cp-crime-results-pcr.
   id 'org.cyclonedx.bom' version '3.3.0'
-  // Microsoft's official Azure Functions Gradle plugin — the equivalent of
-  // azure-functions-maven-plugin. Provides azureFunctionsPackage / azureFunctionsRun /
-  // azureFunctionsDeploy, and generates function.json from the @FunctionName annotations.
   id 'com.microsoft.azure.azurefunctions' version '1.17.0'
-  // Starts the docker-compose services the integration tests need before `test` in CI — the same
-  // pattern and plugin service-cp-crime-results-pcr uses for its Postgres/Redis.
   id 'com.avast.gradle.docker-compose' version '0.17.21'
 }
 
 group = 'uk.gov.hmcts.cp'
 version = System.getProperty('ARTEFACT_VERSION') ?: '0.0.999'
 
-// Deployment coordinates. Confirm with the platform team before first deploy — the resource group
-// in particular is inherited from the legacy LAA app and is likely wrong for an AMP-owned service.
-// Deployment coordinates follow the estate convention: fa-<env>-ccpNNNN-<short> inside
-// RG-<ENV>-CCPNNNN-HEARINGRES, alongside the seven sibling hearing-resulted function apps.
-//
-// An `ext` property, not a `def` local: gradle/docker-test.gradle needs functionAppName to locate the
-// staging directory it mounts into the container, and applied scripts cannot see locals.
-ext.functionAppName = System.getProperty('FUNCTION_APP_NAME') ?: 'fa-ste-ccp0121-pcrrelay'
+ext.functionAppName = System.getProperty('FUNCTION_APP_NAME') ?: 'fa-pcrrelay'
 
 apply {
   from("$rootDir/gradle/repositories.gradle")
@@ -33,17 +20,11 @@ apply {
   from("$rootDir/gradle/docker-test.gradle")
 }
 
-// We MUST keep all dependencies in the build.gradle to allow dependabot to provide version updates
-// Sadly, dependabot does not track dependencies in the apply-from files
 dependencies {
   // Azure Functions. Must be `implementation`, NOT `compileOnly`: azureFunctionsPackage scans the
   // runtime classpath to find @FunctionName entry points, and fails with
   // ClassNotFoundException: com.microsoft.azure.functions.annotation.FunctionName if the
   // annotations are only on the compile classpath.
-  //
-  // Consequence: unlike the Maven build's `provided` scope, this artifact IS staged into lib/.
-  // The Java worker supplies its own copy at runtime, and two copies risk binding-resolution
-  // errors, so the pruneWorkerProvidedJars task below removes it after packaging.
   implementation 'com.microsoft.azure.functions:azure-functions-java-library:3.3.0'
 
   // JSON
@@ -64,8 +45,6 @@ dependencies {
   // Same WireMock version as service-cp-crime-results-pcr; used as a client against the
   // compose-started WireMock rather than in-process, since the container under test must reach it.
   testImplementation 'org.wiremock:wiremock-standalone:3.13.2'
-  // The host acknowledges the webhook before the invocation completes, so assertions on what the
-  // stub received have to poll rather than read immediately.
   testImplementation 'org.awaitility:awaitility:4.3.0'
 }
 
@@ -82,11 +61,6 @@ azurefunctions {
     os = 'linux'
     // '25' (or 'Java 25') — NOT '25.0'. Verified against azureFunctionsDeploy: '25' and 'Java 25'
     // both deploy; '25.0' fails with "Invalid runtime configuration".
-    //
-    // Do not "align" this with the Azure CLI, which wants the opposite: `az functionapp create
-    // --runtime-version` accepts only '25.0' and rejects '25'. The two tools validate the same
-    // concept with incompatible formats, so the README's az command and this block differ on
-    // purpose.
     javaVersion = '25'
   }
 
@@ -99,8 +73,7 @@ azurefunctions {
     FUNCTIONS_EXTENSION_VERSION = '~4'
     FUNCTIONS_WORKER_RUNTIME = 'java'
     // The CA bundle ships in the package (see stageInternalCaBundle), so this path is where it
-    // lands. Only applied by azureFunctionsDeploy — a config-zip deploy needs it set separately
-    // with `az functionapp config appsettings set`.
+    // lands.
     PCR_SERVICE_CA_BUNDLE_PATH = '/home/site/wwwroot/internal_ca_certs.pem'
   }
 
@@ -109,8 +82,7 @@ azurefunctions {
 
 // azureFunctionsPackage stages every runtime dependency into lib/, including
 // azure-functions-java-library. The Azure Functions Java worker provides that library itself, and
-// a second copy on the classpath risks binding-resolution errors — the Maven build avoided this
-// with `provided` scope, which is not available to us here (see the dependency comment above).
+// a second copy on the classpath risks binding-resolution errors
 // Verified behaviour: the plugin does NOT exclude it, so prune it explicitly.
 def workerProvidedJarPatterns = ['azure-functions-java-library-*.jar']
 
@@ -162,7 +134,7 @@ def caBundleSourceSetting = (System.getProperty('CA_BUNDLE_SOURCE')
 def caBundleFromInfra = null
 if (caBundleSourceSetting) {
   final File candidate = new File(caBundleSourceSetting)
-  caBundleFromInfra = candidate.isAbsolute() ? candidate
+  caBundleFromInfra = candare idate.isAbsolute() ? candidate
           : layout.projectDirectory.file(caBundleSourceSetting).asFile
 }
 

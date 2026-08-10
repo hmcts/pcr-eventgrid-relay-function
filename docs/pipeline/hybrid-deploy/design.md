@@ -42,6 +42,13 @@ in DEV is bit-for-bit what reaches production. This already almost holds:
 | CA bundle baked into the zip | ✅ one bundle carries live *and* non-live roots (verified) — environment-agnostic |
 | `PCR_SERVICE_INGESTION_ENDPOINT` | ✅ an app setting, not in the zip. The only value that genuinely varies |
 | `appSettings` in `build.gradle` | ❌ **breaks it.** The Gradle plugin asserts app settings and needs `appName`/`resourceGroup` at deploy time, coupling the artefact to one app. Must move to IaC (§4) |
+| the artefact's **name** | ✅ `fa-pcrrelay.zip` — environment-neutral. It was `fa-ste-ccp0121-pcrrelay.zip`, which named the artefact after one environment's app and quietly contradicted promoting it to others |
+
+The deploy target is a separate input (`deploy_app_name`), used only by the deploy step. Keeping the two
+apart matters more than it sounds: while one value served both, a stale copy of it in
+`docker-compose.yml` mounted a directory that no longer existed, and the symptom was a five-minute
+integration-test timeout that read as slowness. `gradle/docker-test.gradle` now exports
+`FUNCTION_APP_STAGING_DIR` from `functionAppName`, so compose cannot disagree with the build.
 
 ### 2.1 Where the artefact lives
 
