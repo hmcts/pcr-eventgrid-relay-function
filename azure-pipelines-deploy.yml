@@ -38,15 +38,7 @@ parameters:
   - nonlive
   - live
 - name: artefactVersion
-  displayName: "Version of the pcr-eventgrid-relay-function package to deploy"
-  type: string
-  default: ''
-- name: storageAccount
-  displayName: "Storage account GH Actions uploaded the built zip to (output of the Upload package step in ci-build-deploy.yml)"
-  type: string
-  default: ''
-- name: blobName
-  displayName: "Blob name GH Actions uploaded the built zip as"
+  displayName: "Version of the pcr-eventgrid-relay-function package to deploy (Azure Artifacts Universal Package version, published by ci-build-deploy.yml)"
   type: string
   default: ''
 - name: agentPool
@@ -288,24 +280,19 @@ stages:
             echo "##vso[task.setvariable variable=RG;isOutput=true]RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
             echo "##vso[task.setvariable variable=APP;isOutput=true]fa-${ENV}-${SLOT}-pcrrelay"
 
-      - task: AzureCLI@2
-        displayName: 'Download the packaged zip built by GitHub Actions (uploaded to the target storage account)'
+      # Mirrors service-cp-crime-results-pcr's own pattern: GitHub Actions never logs into
+      # Azure directly, and this pipeline uses its own already-working identity rather than
+      # a PAT passed in from outside. Feed name is a placeholder — needs confirming/creating
+      # in hmcts-cpp (not the hmcts/hmcts-lib feed PCR's Maven publish uses; that's a
+      # different ADO org, and this task assumes a same-org feed).
+      - task: UniversalPackages@0
+        displayName: 'Download the packaged zip built by GitHub Actions (Azure Artifacts Universal Package)'
         inputs:
-          azureSubscription: ${{ variables.azureServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-            # No dedicated build-artifacts store exists — GH Actions' ci-build-deploy.yml
-            # uploads the zip straight into the target environment's own existing
-            # storage account (the "Upload package to target environment's storage
-            # account" step there) and passes storageAccount/blobName through as
-            # template_parameters when it triggers this pipeline.
-            mkdir -p "$(Pipeline.Workspace)/package"
-            az storage blob download \
-              --account-name "${{ parameters.storageAccount }}" --auth-mode login \
-              --container-name releases --name "${{ parameters.blobName }}" \
-              --file "$(Pipeline.Workspace)/package/${{ parameters.blobName }}"
+          command: download
+          downloadDirectory: '$(Pipeline.Workspace)/package'
+          vstsFeed: 'cpp-apps-artifacts'
+          vstsFeedPackage: 'pcr-eventgrid-relay-function'
+          vstsPackageVersion: '${{ parameters.artefactVersion }}'
 
       - task: AzureCLI@2
         displayName: 'Upload package to blob storage and point WEBSITE_RUN_FROM_PACKAGE at it'

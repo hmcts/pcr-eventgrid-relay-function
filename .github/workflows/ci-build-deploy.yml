@@ -10,22 +10,19 @@ name: CI Build and Deploy
 #   -----------                                    ---------
 #   publish bootJar to Maven repos          ->     (nothing — not a library)
 #   build Docker image, push to ghcr        ->     (nothing — no image)
-#   ADO pipeline 460: copy image to ACR     ->     upload zip to target env's storage account
+#   ADO pipeline 460: copy image to ACR     ->     publish zip as an Azure Artifacts
+#                                                   Universal Package
 #   ADO pipeline 434: Helm deploy to AKS    ->     trigger a dedicated Functions-deploy ADO
 #                                                   pipeline (azure-pipelines-deploy.yml),
 #                                                   since the shared CPP ADO agent pools only
 #                                                   offer Java 21 and this repo needs Java 25
 #
+# Like the PCR service, this never logs into Azure directly from GitHub Actions — the only
+# Azure-adjacent credential is HMCTS_ADO_PAT, same as PCR uses to trigger pipelines 460/434.
+#
 on:
   workflow_call:
     secrets:
-      AZURE_CLIENT_ID:
-        required: false
-        description: "Entra app (federated credential) for OIDC login. Deploy is skipped when unset."
-      AZURE_TENANT_ID:
-        required: false
-      AZURE_SUBSCRIPTION_ID:
-        required: false
       GITLEAKS_LICENSE:
         required: false
       HMCTS_ADO_PAT:
@@ -274,19 +271,22 @@ jobs:
     environment:
       name: ${{ inputs.environment }}
     permissions:
-      id-token: write   # required for OIDC federated login
       contents: read
     steps:
-      # Passed via env rather than interpolated into the script, so the secret is never expanded
-      # into a command line.
+      # Mirrors service-cp-crime-results-pcr's own CI exactly: that repo never logs into
+      # Azure from GitHub Actions at all — every Azure-touching step happens inside an ADO
+      # pipeline that already has a working service connection (ado_nonlive_workload_identity
+      # for this one). The only credential needed here is the same ADO PAT already used to
+      # trigger the pipeline. No AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID, no Entra federated
+      # credential to provision — HMCTS_ADO_PAT just needs sharing with this repo.
       - name: Check deploy credentials are configured
         id: creds
         env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          HMCTS_ADO_PAT: ${{ secrets.HMCTS_ADO_PAT }}
         run: |
-          if [ -z "$AZURE_CLIENT_ID" ]; then
-            echo "::warning::AZURE_CLIENT_ID is not set — skipping deploy."
-            echo "::warning::Provision the Entra federated credential and secrets, then re-run."
+          if [ -z "$HMCTS_ADO_PAT" ]; then
+            echo "::warning::HMCTS_ADO_PAT is not set — skipping deploy."
+            echo "::warning::Ask for this repo to be added to that org secret's allowed-repos list, then re-run."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -299,53 +299,40 @@ jobs:
           name: function-app-zip
           path: dist
 
-      - name: Azure login (OIDC)
+      # NEW: feed name is a placeholder — needs confirming/creating in hmcts-cpp (not the
+      # hmcts/hmcts-lib feed PCR's Maven publish uses; that's a different ADO org, and
+      # cross-org access would need its own service connection rather than the pipeline's
+      # built-in identity). az artifacts universal publish only needs a PAT, no Azure login.
+      - name: Publish package to Azure Artifacts (Universal Package)
         if: steps.creds.outputs.configured == 'true'
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # No dedicated build-artifacts store exists (checked — only the per-environment
-      # storage accounts DEPLOYMENT.md already documents, e.g. sasteccp0121hearingres).
-      # Rather than provision a new one, upload straight into the target environment's
-      # own existing storage account. The ADO deploy pipeline resolves this same account
-      # from AzureWebJobsStorage for its own WEBSITE_RUN_FROM_PACKAGE step, so this is
-      # the one place the zip needs to land, not an intermediate copy.
-      - name: Upload package to target environment's storage account
-        if: steps.creds.outputs.configured == 'true'
-        id: upload
+        env:
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.HMCTS_ADO_PAT }}
         run: |
           set -euo pipefail
-          STORAGE=$(az storage account list -g "${{ inputs.function_resource_group }}" --query "[0].name" -o tsv)
-          BLOB="${{ inputs.function_app_name }}-${{ needs.Artefact-Version.outputs.artefact_version }}.zip"
-
-          az storage container create --account-name "$STORAGE" --name releases --auth-mode login &>/dev/null || true
-          az storage blob upload --account-name "$STORAGE" --auth-mode login \
-            --container-name releases --name "$BLOB" \
-            --file "dist/${{ needs.Build.outputs.zip_name }}" --overwrite
-
-          echo "storage_account=$STORAGE" >> "$GITHUB_OUTPUT"
-          echo "blob_name=$BLOB" >> "$GITHUB_OUTPUT"
+          az extension add --name azure-devops --only-show-errors --yes
+          az artifacts universal publish \
+            --organization "https://dev.azure.com/hmcts-cpp" \
+            --feed "cpp-apps-artifacts" \
+            --name "pcr-eventgrid-relay-function" \
+            --version "${{ needs.Artefact-Version.outputs.artefact_version }}" \
+            --path "dist" \
+            --description "Azure Functions deploy package for ${{ inputs.function_app_name }}"
 
       # Replaces the previous direct Azure/functions-action deploy — the shared CPP ADO
       # agent pools only offer Java 21 (see CLAUDE.md), so build stays here, but actual
       # deployment goes through ADO instead, matching how the PCR service's own pipeline
-      # is triggered from Actions (pipeline_id below is a placeholder — fill in once a
-      # Functions-capable pipeline, e.g. azure-pipelines-deploy.yml, is registered in ADO).
+      # is triggered from Actions. pipeline_id 793 is pcr-eventgrid-relay-deploy, registered
+      # in hmcts-cpp/cpp-apps against azure-pipelines-deploy.yml.
       - name: Trigger ADO deploy pipeline
         if: steps.creds.outputs.configured == 'true'
         uses: hmcts/trigger-ado-pipeline@v2
         with:
-          pipeline_id: 0   # TODO: replace once azure-pipelines-deploy.yml is registered
+          pipeline_id: 793   # pcr-eventgrid-relay-deploy, hmcts-cpp/cpp-apps
           ado_pat: ${{ secrets.HMCTS_ADO_PAT }}
           template_parameters: >
             {
               "environment": "${{ inputs.environment }}",
-              "artefactVersion": "${{ needs.Artefact-Version.outputs.artefact_version }}",
-              "storageAccount": "${{ steps.upload.outputs.storage_account }}",
-              "blobName": "${{ steps.upload.outputs.blob_name }}"
+              "artefactVersion": "${{ needs.Artefact-Version.outputs.artefact_version }}"
             }
 
       - name: Summarise
