@@ -1,0 +1,15 @@
+variables:
+- name: azureServiceConnection
+  value: "ado_nonlive_workload_identity"
+# DEPLOYMENT.md deliberately does not record internal ingress hostnames in this
+# repo ("get the per-environment value from the platform team"). Placeholder
+# below — confirm the real STE-CCP0121 PCR ingestion endpoint before relying on
+# this pipeline's Provision stage.
+- name: pcrServiceIngestionEndpoint
+  value: "https://REPLACE_WITH_REAL_INGRESS_HOST/pcr/internal/hearing-results"
+# Resource ID of the storage account/container the Event Grid subscription's
+# dead-letter destination should use. DEPLOYMENT.md §6 notes the seven sibling
+# subscriptions have none, and a permanently failing event is silently
+# discarded after 24h without one.
+- name: deadletterStorageResourceId
+  value: "REPLACE_WITH_REAL_STORAGE_ACCOUNT_RESOURCE_ID"

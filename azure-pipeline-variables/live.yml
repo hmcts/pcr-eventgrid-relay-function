@@ -1,0 +1,9 @@
+variables:
+- name: azureServiceConnection
+  value: "ado_live_workload_identity"
+# No relay is deployed to any live environment yet (DEPLOYMENT.md §9) — both
+# values below are placeholders until that work actually happens.
+- name: pcrServiceIngestionEndpoint
+  value: "https://REPLACE_WITH_REAL_INGRESS_HOST/pcr/internal/hearing-results"
+- name: deadletterStorageResourceId
+  value: "REPLACE_WITH_REAL_STORAGE_ACCOUNT_RESOURCE_ID"
