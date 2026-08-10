@@ -295,6 +295,25 @@ stages:
           vstsFeedPackage: 'pcr-eventgrid-relay-function'
           vstsPackageVersion: '${{ parameters.artefactVersion }}'
 
+      # TEMPORARY diagnostic: az account show redacts the SP display name in ADO logs, so two
+      # rounds of granting Storage Blob Data Contributor to plausible candidates (by matching
+      # subscription-level role assignments) haven't fixed the next step. Decode the actual
+      # ARM token's oid claim directly instead of guessing a third time. Remove once resolved.
+      - task: AzureCLI@2
+        displayName: 'DIAGNOSTIC: print the real service principal object ID'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            TOKEN=$(az account get-access-token --resource https://management.azure.com --query accessToken -o tsv)
+            PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+            PADDED=$(printf '%s' "$PAYLOAD" | tr '_-' '/+')
+            MOD=$(( ${#PADDED} % 4 ))
+            if [ "$MOD" -ne 0 ]; then PADDED="${PADDED}$(printf '=%.0s' $(seq 1 $((4 - MOD))))"; fi
+            echo "$PADDED" | base64 -d 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('oid:', d.get('oid')); print('appid:', d.get('appid')); print('name:', d.get('app_displayname') or d.get('name'))"
+
       - task: AzureCLI@2
         displayName: 'Upload package to blob storage and point WEBSITE_RUN_FROM_PACKAGE at it'
         inputs:
