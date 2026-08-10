@@ -62,18 +62,24 @@ TLS handshake — as a bare `IOException`, not an HTTP status. `AdditiveTrust` a
 from `PCR_SERVICE_CA_BUNDLE_PATH`, adding those CAs to the platform defaults (never replacing them).
 `NODE_EXTRA_CA_CERTS`, which the Node siblings use, has no JVM equivalent.
 
-**No certificate material is tracked in this repo.** `stageInternalCaBundle` takes the bundle from
-`CA_BUNDLE_SOURCE` when set — which is what CI does, materialising it from the
-`PCR_INTERNAL_CA_BUNDLE` secret into `RUNNER_TEMP` — and otherwise from `.local/internal_ca_certs.pem`,
-which is git-ignored and exists only on a developer machine. A set-but-missing or non-PEM
-`CA_BUNDLE_SOURCE` **fails the build** rather than falling back, so CI can never silently ship a
-certificate infrastructure did not supply. With neither source the build warns and packages nothing,
-which is correct locally but would break a deployment.
+**No certificate material is tracked here, and the `PCR_INTERNAL_CA_BUNDLE` repo secret is the source
+of truth** (set and verified in CI: 4 certs from the secret into the zip). `stageInternalCaBundle` reads
+`CA_BUNDLE_SOURCE` when set — which is what CI does, materialising the secret into `RUNNER_TEMP` — and
+otherwise `.local/internal_ca_certs.pem`, a git-ignored local convenience copy. If the two disagree the
+secret wins. Rotation is a secret update plus a rebuild: no code change, and no Key Vault work (TODO 4.1
+records why that was dropped).
 
-The bundle *was* committed for a period, so it is still in git history: the repo stays **private**
-until that history is rewritten (TODO 4.1). Do not re-add a PEM to the working tree — `.gitignore`
-blocks `.local/` and the bare filename at any path on purpose.
-Full rationale, rejected alternatives and prerequisites are in README.md under "Internal CA trust".
+Two behaviours that must not be "fixed" into each other: a **set but unusable** `CA_BUNDLE_SOURCE`
+fails the build, so CI can never silently ship a certificate infrastructure did not supply; **no bundle
+at all** only warns, because local builds and the integration tests (plain HTTP) do not need one.
+
+Do not re-add a PEM to the working tree — `.gitignore` blocks `.local/` and the bare filename at any
+path on purpose. The bundle *was* committed for a period and the repo is now **public**, so it is
+publicly retrievable from history: certificates only, no private keys, so this is name/PKI disclosure
+rather than a key compromise. TODO 4.5 has the scoping and the open decision. Do not paste the
+certificate subjects into any file in this repo.
+
+Full rationale and rejected alternatives are in README.md under "Internal CA trust".
 
 Do not "simplify" any of this without reading that section:
 
@@ -81,8 +87,8 @@ Do not "simplify" any of this without reading that section:
   `/var/ssl/certs`, not a PEM bundle at one path.
 - Trust must stay **additive**. Trusting only the private CA silently breaks TLS to every public
   endpoint, and a test asserts the store is `platform defaults + 1`.
-- The build must keep succeeding-with-a-warning when the bundle is missing, so the CI-fetch migration
-  can land without a chicken-and-egg failure.
+- Importing the CAs into the JVM's `cacerts` is not an alternative either — it needs a startup command
+  mutating the JDK inside a managed Functions host, and is invisible to anyone reading the app config.
 
 ## Build & Test Commands
 

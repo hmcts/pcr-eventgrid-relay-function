@@ -145,42 +145,74 @@ synthetic one, so the test would only re-observe the Redis error and prove nothi
 
 ## 4. Security and supply chain
 
-### 4.1 CA bundle is out of the working tree, still in history — P2
-The bundle is **no longer tracked**: `.gitignore` excludes `.local/` and the bare filename at any path,
-local builds read `.local/internal_ca_certs.pem`, and CI reads `CA_BUNDLE_SOURCE`. A set-but-unusable
-path fails the build rather than falling back.
+### 4.1 CA bundle now lives in a GitHub secret — DONE, except history
+The bundle's source of truth is the **`PCR_INTERNAL_CA_BUNDLE` repo secret**, set 10 Aug 2026 and
+verified in CI: 4 certificates from the secret into the zip. Nothing certificate-shaped is tracked —
+`.gitignore` excludes `.local/` and the bare filename at any path — and a set-but-unusable
+`CA_BUNDLE_SOURCE` fails the build rather than falling back to anything.
 
-Two things are still open, and the first is now the more urgent because **CI currently packages no
-bundle at all** — a green build whose artefact cannot complete TLS:
+- [x] Take the bundle from infrastructure rather than the repo
+- [x] Set the `PCR_INTERNAL_CA_BUNDLE` secret — CI artefacts are deployable again
 
-- [ ] Set the `PCR_INTERNAL_CA_BUNDLE` secret (plain PEM or base64). Until then, deploy only from a
-      local build that has `.local/internal_ca_certs.pem` in place, or the app fails every relay at the
-      TLS handshake
-- [ ] Rewrite history to remove the previously-committed bundle, before the repo could return to
-      public. Until then it stays private, and those CAs should be treated as exposed to anyone who has
-      cloned it — if that is not acceptable, rotate them rather than merely un-committing
+**Rotation is now a secret update plus a rebuild, no code change.** A repo-level secret suffices: the
+bundle carries both live and non-live roots, so one value serves every environment, and the earliest
+expiry is April 2028.
 
-Optional: move the bundle to Key Vault rather than a GitHub secret — only the one CI step changes
-(`azure/login` + `az keyvault secret download` writing to the same path), which needs the same
-federated credential as 1.3. Open item **7a**; full rationale in `README` → *Internal CA trust*.
+**Key Vault is not being pursued.** It would change only the one CI step (`azure/login` +
+`az keyvault secret download` to the same path), needs the federated credential from 1.3, and buys
+nothing while the secret works and nothing expires for years. Open item **7a** is closed on that basis;
+revisit only if the platform team wants CA material centralised.
+
+What remains is not about where the bundle lives — see 4.5 for the history exposure.
 
 ### 4.2 Secret scanning and push protection are off — P2
-Blocked by an enterprise policy (`HTTP 422 — Contact your enterprise owner`). The reference repo
-`service-cp-crime-results-pcr` has both enabled, so this app is below the estate's own bar.
+Blocked by an enterprise policy (`HTTP 422 — Contact your enterprise owner`), and **still blocked after
+the repo went public**, so this is not a licensing question and cannot be fixed at repo level. The
+reference repo `service-cp-crime-results-pcr` has secret scanning enabled, so this app is below the
+estate's own bar. Given 4.5, note that GitHub will not alert on committed credentials here.
 
 - [ ] Get an enterprise owner to enable them, or attach the org code-security configuration
 
-### 4.3 CodeQL on a private repo needs GHAS — P2
-The repo was public when CodeQL was set up. Code scanning on private repos requires GitHub Advanced
-Security.
+### 4.3 Code scanning — RESOLVED by going public
+Code scanning on a private repo needed GitHub Advanced Security, and an enterprise policy blocked
+enabling it (`422 — An enterprise policy prevented modifying Code Security enablement`). Making the
+repo public on 7 Aug 2026 removed the licence gate: `Analyze (java)` passes and CodeQL uploads results.
 
-- [ ] Confirm GHAS covers this repo; if not, `codeql.yml` will fail on licensing rather than on findings
+Worth recording, because it cost time: the `main` ruleset requires a status check named `CodeQL` as well
+as `Analyze (java)`. That check is published by the **code-scanning feature itself**, not by
+`codeql.yml`, so while code scanning was disabled it never reported and looked like a misconfigured
+ruleset requiring a non-existent check. It was not — the ruleset was correct and both checks now pass.
+Do not "fix" it by dropping required checks.
 
 ### 4.4 Two dependency bots — P3
 Both `renovate.json` and `.github/dependabot.yml` are active, as in the PCR service. Expect duplicate
 bump PRs.
 
 - [ ] Consolidate on one, or accept and document it
+
+### 4.5 The old CA bundle is in public git history — P1, already happened
+The repo went public on 7 Aug 2026 while the previously-committed bundle was still in history. It is
+retrievable from commits `7f3fce5` and `34f9563`, and two commit messages on published branches name an
+internal ingress host. Removing it from the working tree (4.1) did not remove it from history, and any
+existing clone or fork keeps it regardless.
+
+Scope it accurately before deciding anything:
+
+- **No key material.** The bundle is 4 `CERTIFICATE` blocks and zero `PRIVATE KEY` blocks. A CA
+  certificate is a public object, presented in every TLS handshake to that ingress. This is **not** a
+  key compromise and does not let anyone impersonate the ingress.
+- **What it discloses** is internal PKI and naming topology — the certificate subjects name internal
+  platform and ingress hosts, which is exactly what the PCR design doc redacts as "not for a public
+  repo". Deliberately not repeated here.
+
+So the question is not whether to rotate — rotating a CA does not un-publish a hostname — but whether
+internal-name disclosure is acceptable for a public repo in this estate. Cheapest first:
+
+- [ ] Delete the stale branches whose commit messages carry the host. Removes the most greppable copy
+- [ ] Get a platform/security decision on whether the disclosure is acceptable. If it is, close this and
+      drop the redaction convention from these docs, which currently contradicts the repo being public
+- [ ] If it is not: repo goes private again and history is rewritten before further exposure. Note
+      orphaned commits stay reachable via the API for a period even after branch deletion
 
 ---
 
