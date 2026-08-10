@@ -282,15 +282,16 @@ stages:
 
       # Mirrors service-cp-crime-results-pcr's own pattern: GitHub Actions never logs into
       # Azure directly, and this pipeline uses its own already-working identity rather than
-      # a PAT passed in from outside. Feed name is a placeholder — needs confirming/creating
-      # in hmcts-cpp (not the hmcts/hmcts-lib feed PCR's Maven publish uses; that's a
-      # different ADO org, and this task assumes a same-org feed).
+      # a PAT passed in from outside. cpp-apps-artifacts is a project-scoped feed (created
+      # in the cpp-apps project, not org-wide) — vstsFeed needs the "project/feed" form for
+      # that; plain "cpp-apps-artifacts" resolves at org scope and 404s (verified: task logs
+      # showed "project: null" and TF1600011 even after the feed existed).
       - task: UniversalPackages@0
         displayName: 'Download the packaged zip built by GitHub Actions (Azure Artifacts Universal Package)'
         inputs:
           command: download
           downloadDirectory: '$(Pipeline.Workspace)/package'
-          vstsFeed: 'cpp-apps-artifacts'
+          vstsFeed: 'cpp-apps/cpp-apps-artifacts'
           vstsFeedPackage: 'pcr-eventgrid-relay-function'
           vstsPackageVersion: '${{ parameters.artefactVersion }}'
 
