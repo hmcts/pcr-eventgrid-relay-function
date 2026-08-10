@@ -40,21 +40,19 @@ trust it needs is explained in *Internal CA trust* below.
 
 ## What this does NOT replace
 
-**The legacy JavaScript durable-functions chain keeps running.** The
-`prisoncourtregister-azure-functions` packaging module in
-[`cpp-context-azure-legalaidagency`](../../cpp/cpp-context-azure-legalaidagency) is *not* being
-retired by this work, and this app is *not* a rewrite of it. The PCR API-marketplace design says so
-explicitly — §13 non-goals: *"Changing or retiring existing email/post PCR distribution — additional
-channel, not a replacement"* — and §4a notes the legacy Function App **already listens to the same
-`Hearing_Resulted` event** on its own subscription.
+**The legacy JavaScript durable-functions chain keeps running**, and this app is *not* a rewrite of it.
+The `prisoncourtregister-azure-functions` module in
+[`cpp-context-azure-legalaidagency`](../../cpp/cpp-context-azure-legalaidagency) already listens to the
+same `Hearing_Resulted` event on its own subscription (design §4a), and §13 non-goals is explicit:
+*"Changing or retiring existing email/post PCR distribution — additional channel, not a replacement"*.
 
-The two pipelines run side by side, each with its own Event Grid subscription off the same topic:
+This relay **adds** a channel. The two pipelines run side by side off the same topic:
 
 ```
                           Azure Event Grid — topic: Hearing_Resulted
                                         │
               ┌─────────────────────────┴──────────────────────────┐
-              │ (existing subscription)          (pcr-hearing-results)
+              │ (existing subscription)             (egs-pcr-relay)
               ▼                                                    ▼
   PrisonCourtRegisterEventGridTrigger                 PrisonCourtRegisterHearingResulted
     └─ PrisonCourtRegisterOrchestrator                   (this app)
@@ -72,16 +70,8 @@ The two pipelines run side by side, each with its own Event Grid subscription of
                                                     API Marketplace subscribers
 ```
 
-So this relay adds a channel; it removes nothing. Two consequences worth holding onto:
-
-- **The legacy chain is a live dependency, not dead weight.** The PCR design (§4d) warns that both the
-  Event Grid subscription *and* the Redis cache the PCR service reads may be provisioned as part of
-  the legacy Function App's own Azure resources — "if the Function App is retired, this service's
-  trigger *and* its primary data lookup could both disappear at once". Do not treat the legacy app as
-  safe to switch off.
-- **Register-building logic is reimplemented, not moved.** The PCR service ports the *decision and
-  transform* logic (design §5, "what to port, what not to"); the legacy app keeps its own copy for the
-  PDF path. Expect the two to need keeping in step.
+The legacy app is a **live dependency**, not dead weight — do not treat it as safe to switch off. See
+`CLAUDE.md` → *What it does NOT do* and `docs/pipeline/initial-implementation/plan.md` §2a.
 
 ## The function
 
