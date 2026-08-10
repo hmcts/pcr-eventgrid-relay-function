@@ -78,14 +78,48 @@ So the new pipeline (§6) needs a **GitHub release download** step — a `GitHub
 with a PAT — rather than reusing 460's artefact-download plumbing. That is a few lines, and it is the
 price of not distorting how this repo publishes.
 
+### 3.2 Versioning — implemented
+
+Automated on every merge to main, computed as **the next patch after the highest existing tag**:
+
+```
+event                     version           published?
+------------------------  ----------------  -----------------------------------------
+PR                        0.0.2-3d49701     no  (traceable, sorts correctly, not shipped)
+merge to main             0.0.2             yes — tag v0.0.2 + release + zip asset
+release published by hand v0.1.0            yes — zip attached to the existing release
+```
+
+**Control** is hand-tagging: `git tag v0.1.0 && git push origin v0.1.0`. Automatic patches continue from
+whatever the highest tag is, so a milestone tag is respected on the next merge with no config change.
+
+This deliberately does **not** use `hmcts/artefact-version-action`, unlike all ~40 sibling repos, and the
+reason is an ordering bug that matters specifically for promotion. The action bases the version on the
+**latest** tag, so a build made after `v0.0.1` is versioned `0.0.1-<sha>` — which in semver sorts *below*
+`0.0.1`:
+
+```
+0.0.1-3d49701   ← newer code
+0.0.1           ← the release it came after
+```
+
+For a pipeline whose whole premise is "promote artefact X, then artefact Y", "which of these is newer"
+must have an obvious answer. Basing on the *next* patch fixes it: `0.0.1 < 0.0.2-<sha> < 0.0.2`.
+
+Two safety properties worth preserving if this is ever touched:
+
+- **Tag on success only.** `gh release create` makes the tag as part of the release, after Build passes,
+  so a failed build never leaves an orphan tag that the next run would compute from.
+- **Published versions are immutable.** A re-run against an existing tag that already has an asset warns
+  and does nothing rather than replacing it. Silently swapping the bytes behind a version would destroy
+  the guarantee that makes promotion meaningful.
+
 ## 4. Changes needed in this repo
 
 All in `.github/workflows/ci-build-deploy.yml` unless noted.
 
-1. **Publish the zip as a release asset** on push to `main` and on release. Version comes from
-   `hmcts/artefact-version-action`, already wired: draft versions on `main`, release versions on a
-   published release. Draft builds become pre-releases so `main` merges are promotable without cluttering
-   the release list.
+1. ~~**Publish the zip as a release asset.**~~ **Done** — see §3.2. Every merge to main now tags, releases
+   and attaches the zip, so there is a durable immutable artefact per merge for ADO to pull.
 
 2. **Replace the `Deploy` job.** It currently uses `Azure/functions-action`, which is a Kudu zip deploy.
    That job must go, or two deploy paths exist. Replace with:
@@ -125,7 +159,8 @@ All in `.github/workflows/ci-build-deploy.yml` unless noted.
    `HMCTS_ADO_PAT` — the same shape the PCR service uses.
 
 4. **Fix `ci-released.yml`,** which hardcodes `environment: dev`. A published release deploying to dev
-   means there is nothing to promote *to*. It should take the environment as an input.
+   means there is nothing to promote *to*. It should take the environment as an input. (Its `is_release`
+   input is already gone — the event name carries that, so there was no reason for a second knob.)
 
 5. **Drop `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_SUBSCRIPTION_ID`** from the workflows once ADO
    owns deployment. GHA no longer needs Azure credentials at all, which removes the federated-credential

@@ -18,5 +18,4 @@ jobs:
       PCR_INTERNAL_CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
     with:
       environment: dev
-      is_release: true
       trigger_deploy: true
