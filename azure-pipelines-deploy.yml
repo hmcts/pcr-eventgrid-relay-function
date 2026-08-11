@@ -35,7 +35,7 @@ parameters:
 # ccpNNNN slot within the environment, e.g. ccp0121 (DEPLOYMENT.md §2.2 — not every slot has a
 # topic; confirm before using one not already deployed).
 - name: slot
-  displayName: "Slot (e.g. ccp0121)"
+  displayName: "CCP slot (ccpNNNN)"
   type: string
   default: ccp0121
 - name: platform
@@ -46,6 +46,8 @@ parameters:
   - nonlive
   - live
 # Git tag to deploy, without the leading v — matches the GitHub Release this reads from.
+# Auto-filled when triggered by ci-build-deploy.yml. For a manual run, check
+# https://github.com/hmcts/pcr-eventgrid-relay-function/releases for the tag to use.
 - name: artefactVersion
   displayName: "Artefact version"
   type: string
