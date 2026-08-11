@@ -72,6 +72,11 @@ variables:
 # except whichever one it was last set for. parameters.environment resolves at template-expansion
 # time same as parameters.platform does, so this can split the same way.
 - template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
+# githubToken: repo-scoped GitHub PAT (Contents:Read-only on hmcts/pcr-eventgrid-relay-function),
+# used below to download the GitHub Release asset (design.md §2.1). Library variable group in
+# hmcts-cpp/cpp-apps, not a platform/environment template — one credential covers every platform
+# and environment this pipeline deploys to.
+- group: pcr-eventgrid-relay-gh-token
 
 resources:
   repositories:
@@ -308,10 +313,8 @@ stages:
       # Actions artifacts expire (90 days), and a zip has no business being forced into a
       # Maven-shaped Azure Artifacts coordinate the way the PCR service's jar is.
       #
-      # NEW credential requirement, not yet provisioned: $(githubToken) below must be a real
-      # secret (a Variable Group or pipeline Library secret, not a plain YAML parameter — those
-      # aren't masked) holding a GitHub PAT with `contents: read` on this repo. Nothing today
-      # supplies it; this step will fail with 401 until that's set up.
+      # $(githubToken) comes from the pcr-eventgrid-relay-gh-token Library variable group
+      # (hmcts-cpp/cpp-apps) — a fine-grained PAT scoped to Contents:Read-only on this repo only.
       - bash: |
           set -euo pipefail
           mkdir -p "$(Pipeline.Workspace)/package"
