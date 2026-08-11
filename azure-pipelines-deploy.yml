@@ -363,6 +363,23 @@ stages:
           package: '$(Pipeline.Workspace)/package/pcr-eventgrid-relay-function.zip'
           deploymentMethod: zipDeploy
 
+      # On a VNet-integrated app, AzureFunctionApp@2 falls back to a Kudu zip-extract deploy
+      # (WEBSITE_RUN_FROM_PACKAGE=0) rather than the blob-mount run-from-package URL it uses on a
+      # non-VNet app — confirmed against fa-ste-ccp0121-pcrrelay's own deploy log. Azure's
+      # automatic post-deploy trigger sync on that path runs on a slow internal timer (observed
+      # ~11 minutes once, here), so force it explicitly instead of waiting on it.
+      - task: AzureCLI@2
+        displayName: 'Force function trigger sync'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            SUB_ID=$(az account show --query id -o tsv)
+            az resource invoke-action --action syncfunctiontriggers --api-version 2022-03-01 \
+              --ids "/subscriptions/$SUB_ID/resourceGroups/$(coords.RG)/providers/Microsoft.Web/sites/$(coords.APP)"
+
       # Lifted from the legacy-app deploy pipeline's PROJECT_VERSION pattern: makes "what
       # version is actually live" a one-line `az functionapp config appsettings list` away.
       - task: AzureCLI@2
