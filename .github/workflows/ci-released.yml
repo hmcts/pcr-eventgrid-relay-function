@@ -28,9 +28,7 @@ jobs:
       HMCTS_CP_ADO_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
       PCR_INTERNAL_CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
     with:
-      # design.md §3 item 4: this used to hardcode "dev", which (a) isn't a valid deploy target for
-      # this relay at all (see ci-draft.yml) and (b) a published release deploying to dev would have
-      # nothing to promote to anyway. release: published carries no user input, so it falls back to
-      # the same ste default ci-draft.yml uses; workflow_dispatch lets a human pick explicitly.
+      # release: published carries no user input, so it falls back to ste (see ci-draft.yml for
+      # why dev isn't valid here); workflow_dispatch lets a human pick explicitly.
       environment: ${{ inputs.environment || 'ste' }}
       trigger_deploy: true

@@ -22,10 +22,8 @@ jobs:
       HMCTS_CP_ADO_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
       PCR_INTERNAL_CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
     with:
-      # NOT "dev" — pcr-data (the endpoint this relay forwards to) has CP_BACKEND_URL pointed at
-      # steccm64 regardless of which topic triggers it, so a dev-topic relay would hit the exact
-      # same backend ste's relay already does. dev was removed as a valid ADO pipeline environment
-      # value for this reason; passing it through here would just fail.
+      # Not "dev" — dev isn't a valid pipeline 793 environment (pcr-data's backend is steccm64
+      # regardless of source topic, so a dev relay would just duplicate ste's).
       environment: ste
       # Build and verify the zip on PRs, but only deploy on a push to main.
       trigger_deploy: ${{ github.event_name == 'push' }}

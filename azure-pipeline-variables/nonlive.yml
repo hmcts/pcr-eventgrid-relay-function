@@ -1,7 +1,5 @@
 variables:
 - name: azureServiceConnection
   value: "ado_nonlive_workload_identity"
-# pcrServiceIngestionEndpoint and deadletterStorageResourceId used to live here, but they're
-# NOT platform-scoped — dev/sit/ste each have a different real ingress host and storage
-# account. Moved to azure-pipeline-variables/env-<environment>.yml, included separately in
-# azure-pipelines-deploy.yml alongside this file.
+# pcrServiceIngestionEndpoint and deadletterStorageResourceId are per-environment, not
+# per-platform — see azure-pipeline-variables/env-<environment>.yml.

@@ -1,22 +1,11 @@
 name: CI Build and Deploy
 
 # Reusable workflow, called by ci-draft.yml (PR / push to main) and ci-released.yml (release).
-#
-# Adapted from service-cp-crime-results-pcr's ci-build-publish.yml. The Build job mirrors it closely;
-# versioning and everything downstream are deliberately different, because this repo ships an
-# **Azure Functions deployment zip**, not a Spring Boot container (and see the Version job on why
-# hmcts/artefact-version-action is not used):
-#
-#   PCR service                                    this repo
-#   -----------                                    ---------
-#   publish bootJar to Maven repos          ->     (nothing — not a library)
-#   build Docker image, push to ghcr        ->     (nothing — no image)
-#   ADO pipeline 460: copy image to ACR     ->     (nothing — the release asset IS the artefact)
-#   ADO pipeline 434: Helm deploy to AKS    ->     trigger ADO pipeline 793 (pcr-eventgrid-relay-deploy)
-#
-# Implements docs/pipeline/hybrid-deploy/design.md. GHA never touches Azure — HMCTS_CP_ADO_PAT is
-# the only Azure-adjacent credential, used solely to trigger/monitor the ADO deploy pipeline.
-#
+# Implements docs/pipeline/hybrid-deploy/design.md: this repo ships an Azure Functions
+# deployment zip via a GitHub Release, not a container, so there's no image/Maven publish step
+# — GHA never touches Azure directly, it just triggers/monitors ADO pipeline 793 via
+# HMCTS_CP_ADO_PAT.
+
 on:
   workflow_call:
     secrets:
@@ -40,10 +29,6 @@ on:
       trigger_deploy:
         required: true
         type: boolean
-      # deploy_app_name/function_resource_group used to be passed here for the old direct
-      # Azure/functions-action deploy. design.md §3 item 2 is explicit: "Deliberately not passing
-      # the Function App name or resource group: ADO owns the environment->app mapping" — pipeline
-      # 793 resolves both itself from environment/slot. Removed rather than left as dead inputs.
 
 jobs:
   # Version is computed as "the NEXT patch after the highest existing tag", not as a suffix on the
@@ -358,21 +343,10 @@ jobs:
             echo "Attached $(basename "$ZIP") to existing $TAG" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  # ==========================================================================================
-  # Implements docs/pipeline/hybrid-deploy/design.md §3 item 2. Replaces the old direct
-  # Azure/functions-action deploy — GHA no longer touches Azure at all, matching
-  # service-cp-crime-results-pcr's own pattern of triggering ADO pipelines 460/434 rather than
-  # authenticating to Azure itself. HMCTS_CP_ADO_PAT is the only credential needed; confirmed
-  # already shared with this repo via a live workflow test (distinct from HMCTS_ADO_PAT, which
-  # PCR uses for 460/434 and which is NOT shared here — easy to conflate the two names).
-  #
-  # pipeline_id 793 (pcr-eventgrid-relay-deploy, hmcts-cpp/cpp-apps) is a repo-specific pipeline,
-  # not yet the shared cpp-azure-devops-templates one the design envisions (§5 — still a
-  # platform-team dependency). It downloads the GitHub Release asset Publish-Release attaches
-  # above, then runs AzureFunctionApp@2 zipDeploy against the target environment's app —
-  # deliberately still passing environment/slot, since this pipeline resolves the app/resource
-  # group itself rather than a platform-owned mapping table.
-  # ==========================================================================================
+  # Implements design.md §3 item 2: triggers ADO pipeline 793 (pcr-eventgrid-relay-deploy,
+  # hmcts-cpp/cpp-apps), which downloads the release asset Publish-Release attaches above and
+  # deploys it. HMCTS_CP_ADO_PAT is distinct from HMCTS_ADO_PAT (which PCR uses for its own
+  # pipelines 460/434) — easy to conflate the two names.
   Trigger-Deploy:
     needs: [Artefact-Version, Build]
     if: ${{ inputs.trigger_deploy }}

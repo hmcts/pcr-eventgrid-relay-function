@@ -2,25 +2,14 @@ name: CPP PCR EventGrid Relay Function Deployment
 trigger: none
 pr: none
 
-# ==============================================================================
 # Deploy-only pipeline, implementing docs/pipeline/hybrid-deploy/design.md. Build stays in
 # GitHub Actions (ci-build-deploy.yml) — the shared CPP ADO agent pools only offer Java 21,
-# and this app's Gradle toolchain pins Java 25 (see CLAUDE.md "CI — GitHub Actions"). This
-# pipeline downloads the GitHub Release asset that build produces and deploys it; it never
-# runs Gradle itself.
+# and this app's Gradle toolchain pins Java 25. Registered in hmcts-cpp/cpp-apps as pipeline
+# 793, still repo-specific rather than the shared template design.md §5 envisions.
 #
-# Registered in hmcts-cpp/cpp-apps as pipeline 793 (pcr-eventgrid-relay-deploy) — a
-# repo-specific pipeline, not yet the shared cpp-azure-devops-templates one design.md §5
-# envisions (still a platform-team dependency).
-#
-# Provision stage: every az command is taken verbatim from docs/DEPLOYMENT.md, a runbook
-# actually run against STE-CCP0121 (verified 7 Aug 2026). Deploy stage: implements design.md
-# §2.1 (GitHub Release artefact) and §3.1 (the WEBSITE_RUN_FROM_PACKAGE=1 cut-over via
-# AzureFunctionApp@2/zipDeploy). Anything not lifted from one of those two documents is called
-# out inline as a new choice this pipeline makes, so it's obvious what's proven versus what
-# needs review — in particular, the GitHub PAT this now needs is NOT yet provisioned (see the
-# Deploy stage).
-# ==============================================================================
+# Provision stage az commands are taken verbatim from docs/DEPLOYMENT.md. Deploy stage
+# implements design.md §2.1 (GitHub Release artefact) and §3.1 (WEBSITE_RUN_FROM_PACKAGE
+# cut-over via AzureFunctionApp@2/zipDeploy).
 
 parameters:
 - name: environment
@@ -73,20 +62,13 @@ parameters:
   default: false
 
 variables:
-# azureServiceConnection is genuinely platform-scoped (nonlive vs live) — one value covers
-# every environment on that platform.
+# azureServiceConnection is platform-scoped (nonlive vs live).
 - template: azure-pipeline-variables/${{ parameters.platform }}.yml
-# pcrServiceIngestionEndpoint/deadletterStorageResourceId are NOT platform-scoped — dev, sit,
-# and ste each have a different real ingress host (confirmed the hard way earlier: ns-dev-amp-01
-# turned out to secretly back steccm64, so nothing about these values can be assumed to match
-# across environments). A single flat value per platform silently breaks every environment
-# except whichever one it was last set for. parameters.environment resolves at template-expansion
-# time same as parameters.platform does, so this can split the same way.
+# pcrServiceIngestionEndpoint/deadletterStorageResourceId are per-environment, not
+# per-platform — each of dev/sit/ste has a genuinely different ingress host.
 - template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
-# githubToken: repo-scoped GitHub PAT (Contents:Read-only on hmcts/pcr-eventgrid-relay-function),
-# used below to download the GitHub Release asset (design.md §2.1). Library variable group in
-# hmcts-cpp/cpp-apps, not a platform/environment template — one credential covers every platform
-# and environment this pipeline deploys to.
+# githubToken: fine-grained PAT (Contents:Read-only on this repo only) used below to
+# download the GitHub Release asset (design.md §2.1).
 - group: pcr-eventgrid-relay-gh-token
 
 resources:
@@ -98,13 +80,9 @@ resources:
     endpoint: 'hmcts'
 
 stages:
-  # ============================================================================
-  # Provision — one-time, manual-gated. DEPLOYMENT.md §4 (create app + VNet
-  # integration + static settings) and §6 (Event Grid subscription).
-  # Idempotency checks are this pipeline's own addition — the doc's commands
-  # assume a fresh resource group and would error or duplicate on a re-run
-  # otherwise.
-  # ============================================================================
+  # Provision — one-time, manual-gated. DEPLOYMENT.md §4 (create app + VNet integration +
+  # static settings) and §6 (Event Grid subscription). Idempotency checks are this
+  # pipeline's own addition; the doc's commands assume a fresh resource group.
   - stage: Provision
     condition: and(eq(variables['Build.Reason'], 'Manual'), eq('${{ parameters.runProvision }}', 'true'))
     pool:
@@ -138,15 +116,14 @@ stages:
             echo "##vso[task.setvariable variable=AI;isOutput=true]$AI"
             echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]$TOPIC_NAME"
 
-            # DEPLOYMENT.md §2.2: "The plan's OS ... Confirm ... must be true. You
-            # cannot mix OS on one plan."
+            # DEPLOYMENT.md §2.2: plans can't mix OS, so check Linux before anything else uses it.
             RESERVED=$(az appservice plan show -g "$RG" -n "$PLAN" --query reserved -o tsv 2>/dev/null || echo "MISSING")
             if [ "$RESERVED" != "true" ]; then
               echo "##vso[task.logissue type=error]App Service plan $PLAN missing or not Linux (reserved=$RESERVED). Java 25 needs Linux; do not let this create a new plan."
               exit 1
             fi
 
-            # DEPLOYMENT.md §2.2: "The topic must exist ... not all [slots do]."
+            # Not every slot has a topic (DEPLOYMENT.md §2.2).
             if ! az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" &>/dev/null; then
               echo "##vso[task.logissue type=error]Topic $TOPIC_NAME does not exist in $RG — nothing to subscribe to."
               exit 1
@@ -212,11 +189,6 @@ stages:
           inlineScript: |
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
-            # $(pcrServiceIngestionEndpoint) must come from the per-platform
-            # variables template — the doc deliberately does not record ingress
-            # hostnames in this repo ("get the per-environment value from the
-            # platform team"). NEW for this pipeline: add that variable to
-            # azure-pipeline-variables/${{ parameters.platform }}.yml before use.
             az functionapp config appsettings set -g "$RG" -n "$APP" --settings \
               PCR_SERVICE_INGESTION_ENDPOINT="$(pcrServiceIngestionEndpoint)" \
               PCR_SERVICE_CA_BUNDLE_PATH=/home/site/wwwroot/internal_ca_certs.pem \
@@ -232,14 +204,9 @@ stages:
           inlineScript: |
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
-            # "Java cold-starts on Elastic Premium take up to a minute; retry
-            # before concluding failure. This must pass before wiring the
-            # subscription — Event Grid validates the target function exists."
-            # 16*20s = ~5min: a throwaway-app smoke test hit a first-ever cold
-            # start (zero pre-warmed instances) that outran the original
-            # 10*15s=150s budget, even though the function registered ~30-60s
-            # later. A long-lived plan warms fast; this margin covers a plan
-            # with nothing running on it yet.
+            # Must pass before wiring the subscription — Event Grid validates the target
+            # function exists. ~5min budget: cold start on a plan with no warm instances
+            # can outrun a shorter window.
             for i in $(seq 1 16); do
               if az functionapp function list -g "$RG" -n "$APP" -o tsv --query "[?name=='PrisonCourtRegisterHearingResulted']" | grep -q .; then
                 echo "Function registered."
@@ -269,15 +236,10 @@ stages:
 
             FN="$(az functionapp show -g "$RG" -n "$APP" --query id -o tsv)/functions/PrisonCourtRegisterHearingResulted"
 
-            # --included-event-types Hearing_Resulted is required for
-            # correctness, not tidiness: the topic also carries
-            # Hearing_Resulted_Complex, which PCR rejects with a non-retryable
-            # 400 (DEPLOYMENT.md §6).
-            #
-            # $(deadletterStorageResourceId) is a NEW variable this pipeline
-            # needs added to the platform template — the doc notes the seven
-            # siblings have no dead-letter destination and a failing event is
-            # silently discarded after 24h without one (DEPLOYMENT.md §6).
+            # --included-event-types Hearing_Resulted is required for correctness: the topic
+            # also carries Hearing_Resulted_Complex, which PCR rejects with a non-retryable
+            # 400. Without --deadletter-endpoint, a failing event is silently discarded
+            # after 24h (DEPLOYMENT.md §6).
             az eventgrid event-subscription create \
               --name egs-pcr-relay \
               --source-resource-id "$TOPIC" \
@@ -286,23 +248,8 @@ stages:
               --max-delivery-attempts 30 --event-ttl 1440 \
               --deadletter-endpoint "$(deadletterStorageResourceId)/blobServices/default/containers/pcr-relay-deadletter"
 
-  # ============================================================================
-  # Deploy — routine, runs on every release. Never touches the Event Grid
-  # subscription or creates the app; both are Provision-only, one-time actions.
-  #
-  # Implements docs/pipeline/hybrid-deploy/design.md §2.1/§3.1, replacing this pipeline's
-  # earlier bespoke mechanism (Azure Artifacts Universal Package + hand-rolled blob-SAS
-  # WEBSITE_RUN_FROM_PACKAGE script — see git history if that's ever needed for reference).
-  #
-  # design.md §3.1 is explicit that the switch to zipDeploy is a ONE-TIME CUT-OVER, not
-  # something to run casually against a live app: "proven against a throwaway app first, not
-  # this one" — setting WEBSITE_RUN_FROM_PACKAGE=1 on its own, before SitePackages has
-  # anything in it, leaves the app with NO CODE. AzureFunctionApp@2's zipDeploy sets that app
-  # setting and populates SitePackages in the same operation, which is why deploy and cut-over
-  # happen as a single task below rather than as separate steps — review the design doc's
-  # sequencing (delete the Event Grid subscription first, outside any period events matter)
-  # before running this against fa-ste-ccp0121-pcrrelay for real.
-  # ============================================================================
+  # Deploy — routine, runs on every release. Never touches the Event Grid subscription or
+  # creates the app; both are Provision-only. Implements design.md §2.1/§3.1.
   - stage: Deploy
     dependsOn: []
     condition: always()
@@ -326,11 +273,7 @@ stages:
             echo "##vso[task.setvariable variable=APP;isOutput=true]fa-${ENV}-${SLOT}-pcrrelay"
 
       # design.md §2.1: the artefact is a GitHub Release asset (immutable, versioned) —
-      # Actions artifacts expire (90 days), and a zip has no business being forced into a
-      # Maven-shaped Azure Artifacts coordinate the way the PCR service's jar is.
-      #
-      # $(githubToken) comes from the pcr-eventgrid-relay-gh-token Library variable group
-      # (hmcts-cpp/cpp-apps) — a fine-grained PAT scoped to Contents:Read-only on this repo only.
+      # Actions artifacts expire after 90 days.
       - bash: |
           set -euo pipefail
           mkdir -p "$(Pipeline.Workspace)/package"
@@ -351,8 +294,8 @@ stages:
             || { echo "##vso[task.logissue type=error]Downloaded asset is empty or missing"; exit 1; }
         displayName: 'Download the GitHub Release asset (design.md §2.1)'
 
-      # design.md §3.1 cut-over. See the stage-level comment above before running this against
-      # the real STE app rather than a throwaway one.
+      # design.md §3.1: the WEBSITE_RUN_FROM_PACKAGE cut-over, done via zipDeploy so deploy
+      # and cut-over happen as one operation rather than leaving the app briefly codeless.
       - task: AzureFunctionApp@2
         displayName: 'Deploy to Azure Functions (zipDeploy — design.md §3.1 cut-over)'
         inputs:
@@ -364,10 +307,9 @@ stages:
           deploymentMethod: zipDeploy
 
       # On a VNet-integrated app, AzureFunctionApp@2 falls back to a Kudu zip-extract deploy
-      # (WEBSITE_RUN_FROM_PACKAGE=0) rather than the blob-mount run-from-package URL it uses on a
-      # non-VNet app — confirmed against fa-ste-ccp0121-pcrrelay's own deploy log. Azure's
-      # automatic post-deploy trigger sync on that path runs on a slow internal timer (observed
-      # ~11 minutes once, here), so force it explicitly instead of waiting on it.
+      # (WEBSITE_RUN_FROM_PACKAGE=0) rather than the blob-mount run-from-package URL it uses on
+      # a non-VNet app, and the automatic post-deploy trigger sync on that path can take far
+      # longer than the verify step's retry budget — force it explicitly instead.
       - task: AzureCLI@2
         displayName: 'Force function trigger sync'
         inputs:
@@ -402,8 +344,7 @@ stages:
           inlineScript: |
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
-            # 16*20s = ~5min — see the Provision-stage verify step for why this is
-            # wider than the original 10*15s: a stone-cold plan can outrun 150s.
+            # Backstop in case the trigger sync above didn't fully take.
             for i in $(seq 1 16); do
               if az functionapp function list -g "$RG" -n "$APP" -o tsv --query "[?name=='PrisonCourtRegisterHearingResulted']" | grep -q .; then
                 echo "Function registered — deploy verified."
