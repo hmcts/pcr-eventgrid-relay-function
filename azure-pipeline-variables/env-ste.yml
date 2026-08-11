@@ -1,0 +1,9 @@
+variables:
+# Confirmed working — this exact URL was tested repeatedly this session (webhook calls,
+# Redis fix verification) against the pcr-data pod backing steccm64. ns-dev-amp-01 turned out
+# to secretly host steccm64's own amp tier, so devamp01 is genuinely correct for STE-CCP0121
+# despite the hostname's "dev" naming — not a copy-paste mistake.
+- name: pcrServiceIngestionEndpoint
+  value: "https://devamp01.ingress01.dev.nl.cjscp.org.uk/pcr/internal/hearing-results"
+- name: deadletterStorageResourceId
+  value: "/subscriptions/e6b5053b-4c38-4475-a835-a025aeb3d8c7/resourceGroups/RG-STE-CCP0121-HEARINGRES/providers/Microsoft.Storage/storageAccounts/sasteccp0121hearingres"

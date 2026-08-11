@@ -4,21 +4,33 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy this release to'
+        required: true
+        type: choice
+        default: ste
+        options:
+          - sit
+          - ste
+          - prp
+          - prd
 
 jobs:
   ci-release:
     uses: ./.github/workflows/ci-build-deploy.yml
     permissions:
-      id-token: write
       # write, not read: the called workflow's Publish-Release job creates the tag and release. A
       # called workflow cannot request more permission than its caller grants — with `read` here the
       # whole run is rejected at startup, before any job executes.
       contents: write
     secrets:
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      HMCTS_CP_ADO_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
       PCR_INTERNAL_CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
     with:
-      environment: dev
+      # design.md §3 item 4: this used to hardcode "dev", which (a) isn't a valid deploy target for
+      # this relay at all (see ci-draft.yml) and (b) a published release deploying to dev would have
+      # nothing to promote to anyway. release: published carries no user input, so it falls back to
+      # the same ste default ci-draft.yml uses; workflow_dispatch lets a human pick explicitly.
+      environment: ${{ inputs.environment || 'ste' }}
       trigger_deploy: true

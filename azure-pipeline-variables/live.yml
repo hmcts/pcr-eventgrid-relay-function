@@ -1,0 +1,6 @@
+variables:
+- name: azureServiceConnection
+  value: "ado_live_workload_identity"
+# pcrServiceIngestionEndpoint and deadletterStorageResourceId moved to
+# azure-pipeline-variables/env-<environment>.yml — see prp.yml/prd.yml. No relay is deployed
+# to either live environment yet (DEPLOYMENT.md §9), so both are still placeholders there.
