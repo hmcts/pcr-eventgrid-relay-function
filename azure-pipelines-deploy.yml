@@ -89,7 +89,7 @@ stages:
       name: ${{ parameters.agentPool }}
     jobs:
     - job: provision
-      timeoutInMinutes: 30
+      timeoutInMinutes: 40
       steps:
       - task: AzureCLI@2
         name: coords
@@ -205,15 +205,15 @@ stages:
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
             # Must pass before wiring the subscription — Event Grid validates the target
-            # function exists. ~5min budget: cold start on a plan with no warm instances
-            # can outrun a shorter window.
-            for i in $(seq 1 16); do
+            # function exists. 40*30s = 20min — see the Deploy-stage verify step for the
+            # observed real-world delay this covers.
+            for i in $(seq 1 40); do
               if az functionapp function list -g "$RG" -n "$APP" -o tsv --query "[?name=='PrisonCourtRegisterHearingResulted']" | grep -q .; then
                 echo "Function registered."
                 exit 0
               fi
-              echo "Not registered yet (cold start) — retrying in 20s..."
-              sleep 20
+              echo "Not registered yet — retrying in 30s..."
+              sleep 30
             done
             echo "##vso[task.logissue type=error]Function never registered — the app has no deployed code yet. Run the Deploy stage first."
             exit 1
@@ -257,7 +257,7 @@ stages:
       name: ${{ parameters.agentPool }}
     jobs:
     - job: deploy
-      timeoutInMinutes: 20
+      timeoutInMinutes: 30
       steps:
       - task: AzureCLI@2
         name: coords
@@ -344,14 +344,17 @@ stages:
           inlineScript: |
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
-            # Backstop in case the trigger sync above didn't fully take.
-            for i in $(seq 1 16); do
+            # Two real deploys to fa-ste-ccp0121-pcrrelay took ~8min and ~11min for the
+            # function to show up here, regardless of the explicit trigger sync above — ARM's
+            # function-list visibility lags the actual host restart on this VNet+Java+Premium
+            # combination. 40*30s = 20min gives real margin over both observed cases.
+            for i in $(seq 1 40); do
               if az functionapp function list -g "$RG" -n "$APP" -o tsv --query "[?name=='PrisonCourtRegisterHearingResulted']" | grep -q .; then
                 echo "Function registered — deploy verified."
                 exit 0
               fi
-              echo "Not registered yet (cold start) — retrying in 20s..."
-              sleep 20
+              echo "Not registered yet — retrying in 30s..."
+              sleep 30
             done
             echo "##vso[task.logissue type=error]Function never registered after deploy."
             exit 1
