@@ -224,13 +224,18 @@ stages:
             # "Java cold-starts on Elastic Premium take up to a minute; retry
             # before concluding failure. This must pass before wiring the
             # subscription — Event Grid validates the target function exists."
-            for i in $(seq 1 10); do
+            # 16*20s = ~5min: a throwaway-app smoke test hit a first-ever cold
+            # start (zero pre-warmed instances) that outran the original
+            # 10*15s=150s budget, even though the function registered ~30-60s
+            # later. A long-lived plan warms fast; this margin covers a plan
+            # with nothing running on it yet.
+            for i in $(seq 1 16); do
               if az functionapp function list -g "$RG" -n "$APP" -o tsv --query "[?name=='PrisonCourtRegisterHearingResulted']" | grep -q .; then
                 echo "Function registered."
                 exit 0
               fi
-              echo "Not registered yet (cold start) — retrying in 15s..."
-              sleep 15
+              echo "Not registered yet (cold start) — retrying in 20s..."
+              sleep 20
             done
             echo "##vso[task.logissue type=error]Function never registered — the app has no deployed code yet. Run the Deploy stage first."
             exit 1
@@ -369,13 +374,15 @@ stages:
           inlineScript: |
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
-            for i in $(seq 1 10); do
+            # 16*20s = ~5min — see the Provision-stage verify step for why this is
+            # wider than the original 10*15s: a stone-cold plan can outrun 150s.
+            for i in $(seq 1 16); do
               if az functionapp function list -g "$RG" -n "$APP" -o tsv --query "[?name=='PrisonCourtRegisterHearingResulted']" | grep -q .; then
                 echo "Function registered — deploy verified."
                 exit 0
               fi
-              echo "Not registered yet (cold start) — retrying in 15s..."
-              sleep 15
+              echo "Not registered yet (cold start) — retrying in 20s..."
+              sleep 20
             done
             echo "##vso[task.logissue type=error]Function never registered after deploy."
             exit 1
