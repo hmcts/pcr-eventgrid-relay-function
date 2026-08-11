@@ -18,14 +18,16 @@ name: CI Build and Deploy
 #                                                   offer Java 21 and this repo needs Java 25
 #
 # Like the PCR service, this never logs into Azure directly from GitHub Actions — the only
-# Azure-adjacent credential is HMCTS_ADO_PAT, same as PCR uses to trigger pipelines 460/434.
+# Azure-adjacent credential is HMCTS_CP_ADO_PAT. Confirmed already shared with this repo (via
+# a live workflow test) — distinct from HMCTS_ADO_PAT, which PCR uses for pipelines 460/434 and
+# which is NOT shared here. Easy to conflate the two names; they are different secrets.
 #
 on:
   workflow_call:
     secrets:
       GITLEAKS_LICENSE:
         required: false
-      HMCTS_ADO_PAT:
+      HMCTS_CP_ADO_PAT:
         required: false
         description: "PAT for triggering the ADO deploy pipeline. Deploy is skipped when unset, same as AZURE_CLIENT_ID."
       PCR_INTERNAL_CA_BUNDLE:
@@ -278,14 +280,15 @@ jobs:
       # pipeline that already has a working service connection (ado_nonlive_workload_identity
       # for this one). The only credential needed here is the same ADO PAT already used to
       # trigger the pipeline. No AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID, no Entra federated
-      # credential to provision — HMCTS_ADO_PAT just needs sharing with this repo.
+      # credential to provision, and no access request needed either — HMCTS_CP_ADO_PAT is
+      # already shared with this repo (confirmed via a live workflow test).
       - name: Check deploy credentials are configured
         id: creds
         env:
-          HMCTS_ADO_PAT: ${{ secrets.HMCTS_ADO_PAT }}
+          HMCTS_CP_ADO_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
         run: |
-          if [ -z "$HMCTS_ADO_PAT" ]; then
-            echo "::warning::HMCTS_ADO_PAT is not set — skipping deploy."
+          if [ -z "$HMCTS_CP_ADO_PAT" ]; then
+            echo "::warning::HMCTS_CP_ADO_PAT is not set — skipping deploy."
             echo "::warning::Ask for this repo to be added to that org secret's allowed-repos list, then re-run."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
@@ -306,7 +309,7 @@ jobs:
       - name: Publish package to Azure Artifacts (Universal Package)
         if: steps.creds.outputs.configured == 'true'
         env:
-          AZURE_DEVOPS_EXT_PAT: ${{ secrets.HMCTS_ADO_PAT }}
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
         run: |
           set -euo pipefail
           az extension add --name azure-devops --only-show-errors --yes
@@ -328,7 +331,7 @@ jobs:
         uses: hmcts/trigger-ado-pipeline@v2
         with:
           pipeline_id: 793   # pcr-eventgrid-relay-deploy, hmcts-cpp/cpp-apps
-          ado_pat: ${{ secrets.HMCTS_ADO_PAT }}
+          ado_pat: ${{ secrets.HMCTS_CP_ADO_PAT }}
           template_parameters: >
             {
               "environment": "${{ inputs.environment }}",
