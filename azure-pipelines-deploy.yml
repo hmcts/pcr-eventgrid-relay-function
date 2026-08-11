@@ -84,6 +84,7 @@ stages:
       name: ${{ parameters.agentPool }}
     jobs:
     - job: provision
+      timeoutInMinutes: 30
       steps:
       - task: AzureCLI@2
         name: coords
@@ -274,6 +275,7 @@ stages:
       name: ${{ parameters.agentPool }}
     jobs:
     - job: deploy
+      timeoutInMinutes: 20
       steps:
       - task: AzureCLI@2
         name: coords
@@ -340,6 +342,15 @@ stages:
             # made outside of any deploy tooling.
             az functionapp config appsettings set -g "$RG" -n "$APP" \
               --settings WEBSITE_RUN_FROM_PACKAGE="$SAS_URL"
+
+            # Lifted from the legacy-app deploy pipeline's PROJECT_VERSION pattern: makes "what
+            # version is actually live" a one-line `az functionapp config appsettings list` away
+            # instead of needing to decode the WEBSITE_RUN_FROM_PACKAGE blob name. Would have
+            # made an earlier accidental overwrite (a test run's dummy zip clobbering the real
+            # deployed package) obvious immediately instead of only surfacing via a failed
+            # smoke test.
+            az functionapp config appsettings set -g "$RG" -n "$APP" \
+              --settings DEPLOYED_ARTEFACT_VERSION="${{ parameters.artefactVersion }}"
 
             az functionapp restart -g "$RG" -n "$APP"
 
