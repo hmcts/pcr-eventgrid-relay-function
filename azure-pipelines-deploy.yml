@@ -32,8 +32,10 @@ parameters:
   - ste
   - prp
   - prd
+# ccpNNNN slot within the environment, e.g. ccp0121 (DEPLOYMENT.md §2.2 — not every slot has a
+# topic; confirm before using one not already deployed).
 - name: slot
-  displayName: "ccpNNNN slot within the environment, e.g. ccp0121 (DEPLOYMENT.md §2.2 — not every slot has a topic; confirm before using one not already deployed)"
+  displayName: "Slot (e.g. ccp0121)"
   type: string
   default: ccp0121
 - name: platform
@@ -43,21 +45,28 @@ parameters:
   values:
   - nonlive
   - live
+# Git tag to deploy, without the leading v — matches the GitHub Release this reads from.
 - name: artefactVersion
-  displayName: "Version of the pcr-eventgrid-relay-function package to deploy (a git tag, without the leading v — matches the GitHub Release this reads from)"
+  displayName: "Artefact version"
   type: string
   default: ''
+# owner/repo to download the release asset from. Name matches design.md's own trigger snippet
+# exactly, since GH Actions' template_parameters are keyed by parameter name.
 - name: targetRepository
-  displayName: "owner/repo to download the release asset from — name matches design.md's own trigger snippet exactly, since GH Actions' template_parameters are keyed by parameter name"
+  displayName: "Target repository"
   type: string
   default: 'hmcts/pcr-eventgrid-relay-function'
 - name: agentPool
+  displayName: "Agent pool"
   values:
   - "ubuntu-ado-agents-mdv"
   - "ubuntu-ado-agents-mpd"
   default: "ubuntu-ado-agents-mdv"
+# Creates the app, VNet integration, and Event Grid subscription. DEPLOYMENT.md §6 calls the
+# subscription step "the point of no return" — live events start flowing immediately. Leave
+# false for every routine deploy.
 - name: runProvision
-  displayName: "Run one-time provisioning (create app, VNet integration, Event Grid subscription). DEPLOYMENT.md §6 calls the subscription step 'the point of no return' — live events start flowing immediately. Leave false for every routine deploy."
+  displayName: "Run provisioning"
   type: boolean
   default: false
 
