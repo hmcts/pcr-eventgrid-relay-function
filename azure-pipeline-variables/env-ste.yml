@@ -1,0 +1,7 @@
+variables:
+# Confirmed working against the pcr-data pod backing steccm64. devamp01 is genuinely correct
+# for STE-CCP0121 despite the "dev" naming — not a copy-paste mistake.
+- name: pcrServiceIngestionEndpoint
+  value: "https://devamp01.ingress01.dev.nl.cjscp.org.uk/pcr/internal/hearing-results"
+- name: deadletterStorageResourceId
+  value: "/subscriptions/e6b5053b-4c38-4475-a835-a025aeb3d8c7/resourceGroups/RG-STE-CCP0121-HEARINGRES/providers/Microsoft.Storage/storageAccounts/sasteccp0121hearingres"

@@ -1,0 +1,5 @@
+variables:
+- name: azureServiceConnection
+  value: "ado_live_workload_identity"
+# pcrServiceIngestionEndpoint and deadletterStorageResourceId are per-environment — see
+# azure-pipeline-variables/env-<environment>.yml (prp.yml/prd.yml).

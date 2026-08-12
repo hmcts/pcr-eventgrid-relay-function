@@ -1,0 +1,6 @@
+# pcrServiceIngestionEndpoint for STE is a real, confirmed-correct internal ingress hostname
+# (azure-pipeline-variables/env-ste.yml) needed by the deploy pipeline template — not a mistaken
+# leak. Already pushed to origin before this scan ran; history rewrite would require force-pushing
+# a shared feature branch, which is avoided here rather than scrubbing it out (same reasoning as
+# service-cp-crime-results-pcr's own .gitleaksignore).
+6eaeee92225379d5bceaeff1b4cdd180100099e8:azure-pipeline-variables/env-ste.yml:internal-urls:7

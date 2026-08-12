@@ -14,17 +14,16 @@ jobs:
   ci-draft:
     uses: ./.github/workflows/ci-build-deploy.yml
     permissions:
-      id-token: write
       # write, not read: the called workflow's Publish-Release job creates the tag and release. A
       # called workflow cannot request more permission than its caller grants — with `read` here the
       # whole run is rejected at startup, before any job executes.
       contents: write
     secrets:
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      HMCTS_CP_ADO_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
       PCR_INTERNAL_CA_BUNDLE: ${{ secrets.PCR_INTERNAL_CA_BUNDLE }}
     with:
-      environment: dev
+      # Not "dev" — dev isn't a valid pipeline 793 environment (pcr-data's backend is steccm64
+      # regardless of source topic, so a dev relay would just duplicate ste's).
+      environment: ste
       # Build and verify the zip on PRs, but only deploy on a push to main.
       trigger_deploy: ${{ github.event_name == 'push' }}

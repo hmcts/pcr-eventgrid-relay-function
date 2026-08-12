@@ -1,29 +1,17 @@
 name: CI Build and Deploy
 
 # Reusable workflow, called by ci-draft.yml (PR / push to main) and ci-released.yml (release).
-#
-# Adapted from service-cp-crime-results-pcr's ci-build-publish.yml. The Build job mirrors it closely;
-# versioning and everything downstream are deliberately different, because this repo ships an
-# **Azure Functions deployment zip**, not a Spring Boot container (and see the Version job on why
-# hmcts/artefact-version-action is not used):
-#
-#   PCR service                                    this repo
-#   -----------                                    ---------
-#   publish bootJar to Maven repos          ->     (nothing — not a library)
-#   build Docker image, push to ghcr        ->     (nothing — no image)
-#   ADO pipeline 460: copy image to ACR     ->     (nothing)
-#   ADO pipeline 434: Helm deploy to AKS    ->     Azure/functions-action zip deploy
-#
+# Implements docs/pipeline/hybrid-deploy/design.md: this repo ships an Azure Functions
+# deployment zip via a GitHub Release, not a container, so there's no image/Maven publish step
+# — GHA never touches Azure directly, it just triggers/monitors ADO pipeline 793 via
+# HMCTS_CP_ADO_PAT.
+
 on:
   workflow_call:
     secrets:
-      AZURE_CLIENT_ID:
+      HMCTS_CP_ADO_PAT:
         required: false
-        description: "Entra app (federated credential) for OIDC login. Deploy is skipped when unset."
-      AZURE_TENANT_ID:
-        required: false
-      AZURE_SUBSCRIPTION_ID:
-        required: false
+        description: "PAT to trigger/monitor the ADO deploy pipeline. Deploy is skipped when unset."
       GITLEAKS_LICENSE:
         required: false
       PCR_INTERNAL_CA_BUNDLE:
@@ -37,22 +25,10 @@ on:
       environment:
         required: true
         type: string
-        default: dev
+        default: ste
       trigger_deploy:
         required: true
         type: boolean
-      # The DEPLOY TARGET, not the artefact name. The artefact is named by build.gradle's
-      # functionAppName and is environment-neutral on purpose — one zip is promoted to every
-      # environment, so naming it after one app would be a lie. Kept separate after the two were
-      # conflated and a stale copy of this value in docker-compose.yml silently broke local runs.
-      deploy_app_name:
-        required: false
-        type: string
-        default: fa-ste-ccp0121-pcrrelay
-      function_resource_group:
-        required: false
-        type: string
-        default: RG-STE-CCP0121-HEARINGRES
 
 jobs:
   # Version is computed as "the NEXT patch after the highest existing tag", not as a suffix on the
@@ -367,73 +343,56 @@ jobs:
             echo "Attached $(basename "$ZIP") to existing $TAG" >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  # ==========================================================================================
-  # ACTION REQUIRED before this can deploy.
-  #
-  # Needs an Entra app registration with a federated credential for this repo, granted
-  # Contributor (or Website Contributor) on the target Function App, and these repo/environment
-  # secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
-  #
-  # The job SKIPS cleanly when AZURE_CLIENT_ID is unset, so PRs and pushes stay green before that
-  # is provisioned — it does not fail, and it does not silently pretend to have deployed.
-  #
-  # The PCR service deploys via ADO pipelines 460/434 (image -> ACR -> Helm/AKS). None of that
-  # applies to a Functions zip, hence Azure/functions-action instead. If the platform team would
-  # rather keep deployment in ADO, replace this job with hmcts/trigger-ado-pipeline against a
-  # Functions-capable pipeline.
-  # ==========================================================================================
-  Deploy:
+  # Implements design.md §3 item 2: triggers ADO pipeline 793 (pcr-eventgrid-relay-deploy,
+  # hmcts-cpp/cpp-apps), which downloads the release asset Publish-Release attaches above and
+  # deploys it. HMCTS_CP_ADO_PAT is distinct from HMCTS_ADO_PAT (which PCR uses for its own
+  # pipelines 460/434) — easy to conflate the two names.
+  Trigger-Deploy:
     needs: [Artefact-Version, Build]
     if: ${{ inputs.trigger_deploy }}
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ inputs.environment }}
-    permissions:
-      id-token: write   # required for OIDC federated login
-      contents: read
     steps:
-      # Passed via env rather than interpolated into the script, so the secret is never expanded
-      # into a command line.
       - name: Check deploy credentials are configured
         id: creds
         env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          HMCTS_CP_ADO_PAT: ${{ secrets.HMCTS_CP_ADO_PAT }}
         run: |
-          if [ -z "$AZURE_CLIENT_ID" ]; then
-            echo "::warning::AZURE_CLIENT_ID is not set — skipping deploy."
-            echo "::warning::Provision the Entra federated credential and secrets, then re-run."
+          if [ -z "$HMCTS_CP_ADO_PAT" ]; then
+            echo "::warning::HMCTS_CP_ADO_PAT is not set — skipping deploy."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Download Functions zip
+      - name: Trigger ADO deploy pipeline
+        id: trigger
         if: steps.creds.outputs.configured == 'true'
-        uses: actions/download-artifact@v8
+        uses: hmcts/trigger-ado-pipeline@v2
         with:
-          name: function-app-zip
-          path: dist
+          pipeline_id: 793
+          ado_pat: ${{ secrets.HMCTS_CP_ADO_PAT }}
+          template_parameters: >
+            {
+              "environment": "${{ inputs.environment }}",
+              "artefactVersion": "${{ needs.Artefact-Version.outputs.artefact_version }}",
+              "targetRepository": "${{ github.repository }}"
+            }
 
-      - name: Azure login (OIDC)
+      - name: Wait for it
         if: steps.creds.outputs.configured == 'true'
-        uses: azure/login@v2
+        uses: hmcts/monitor-ado-pipeline@v1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Deploy to Azure Functions
-        if: steps.creds.outputs.configured == 'true'
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ inputs.deploy_app_name }}
-          package: dist/${{ needs.Build.outputs.zip_name }}
+          pipeline_id: 793
+          run_id: ${{ steps.trigger.outputs.run_id }}
+          ado_pat: ${{ secrets.HMCTS_CP_ADO_PAT }}
+          poll_interval: 30
+          timeout: 1800
 
       - name: Summarise
         if: always()
         run: |
           if [ "${{ steps.creds.outputs.configured }}" = "true" ]; then
-            echo "Deployed ${{ needs.Artefact-Version.outputs.artefact_version }} to ${{ inputs.deploy_app_name }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Triggered ADO pipeline 793 for ${{ needs.Artefact-Version.outputs.artefact_version }} -> ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Deploy skipped — Azure credentials not configured. See ci-build-deploy.yml." >> "$GITHUB_STEP_SUMMARY"
+            echo "Deploy skipped — HMCTS_CP_ADO_PAT not configured. See ci-build-deploy.yml." >> "$GITHUB_STEP_SUMMARY"
           fi

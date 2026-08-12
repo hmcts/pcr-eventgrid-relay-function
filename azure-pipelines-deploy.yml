@@ -1,0 +1,364 @@
+name: CPP PCR EventGrid Relay Function Deployment
+trigger: none
+pr: none
+
+# Deploy-only pipeline, implementing docs/pipeline/hybrid-deploy/design.md. Build stays in
+# GitHub Actions (ci-build-deploy.yml) — the shared CPP ADO agent pools only offer Java 21,
+# and this app's Gradle toolchain pins Java 25. Registered in hmcts-cpp/cpp-apps as pipeline
+# 793, still repo-specific rather than the shared template design.md §5 envisions.
+#
+# Provision stage az commands are taken verbatim from docs/DEPLOYMENT.md. Deploy stage
+# implements design.md §2.1 (GitHub Release artefact) and §3.1 (WEBSITE_RUN_FROM_PACKAGE
+# cut-over via AzureFunctionApp@2/zipDeploy).
+
+parameters:
+- name: environment
+  displayName: Environment
+  type: string
+  default: ste
+  values:
+  - sit
+  - ste
+  - prp
+  - prd
+# ccpNNNN slot within the environment, e.g. ccp0121 (DEPLOYMENT.md §2.2 — not every slot has a
+# topic; confirm before using one not already deployed).
+- name: slot
+  displayName: "CCP slot (ccpNNNN)"
+  type: string
+  default: ccp0121
+- name: platform
+  displayName: Platform
+  type: string
+  default: nonlive
+  values:
+  - nonlive
+  - live
+# Git tag to deploy, without the leading v — matches the GitHub Release this reads from.
+# Auto-filled when triggered by ci-build-deploy.yml. For a manual run, check
+# https://github.com/hmcts/pcr-eventgrid-relay-function/releases for the tag to use.
+- name: artefactVersion
+  displayName: "Artefact version"
+  type: string
+  default: ''
+# owner/repo to download the release asset from. Name matches design.md's own trigger snippet
+# exactly, since GH Actions' template_parameters are keyed by parameter name.
+- name: targetRepository
+  displayName: "Target repository"
+  type: string
+  default: 'hmcts/pcr-eventgrid-relay-function'
+- name: agentPool
+  displayName: "Agent pool"
+  values:
+  - "ubuntu-ado-agents-mdv"
+  - "ubuntu-ado-agents-mpd"
+  default: "ubuntu-ado-agents-mdv"
+# Creates the app, VNet integration, and Event Grid subscription. DEPLOYMENT.md §6 calls the
+# subscription step "the point of no return" — live events start flowing immediately. Leave
+# false for every routine deploy.
+- name: runProvision
+  displayName: "Run provisioning"
+  type: boolean
+  default: false
+
+variables:
+# azureServiceConnection is platform-scoped (nonlive vs live).
+- template: azure-pipeline-variables/${{ parameters.platform }}.yml
+# pcrServiceIngestionEndpoint/deadletterStorageResourceId are per-environment, not
+# per-platform — each of dev/sit/ste has a genuinely different ingress host.
+- template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
+# githubToken: fine-grained PAT (Contents:Read-only on this repo only) used below to
+# download the GitHub Release asset (design.md §2.1).
+- group: pcr-eventgrid-relay-gh-token
+
+resources:
+  repositories:
+  - repository: cppAzureDevOpsTemplates
+    type: github
+    name: hmcts/cpp-azure-devops-templates
+    ref: 'main'
+    endpoint: 'hmcts'
+
+stages:
+  # Provision — one-time, manual-gated. DEPLOYMENT.md §4 (create app + VNet integration +
+  # static settings) and §6 (Event Grid subscription). Idempotency checks are this
+  # pipeline's own addition; the doc's commands assume a fresh resource group.
+  - stage: Provision
+    condition: and(eq(variables['Build.Reason'], 'Manual'), eq('${{ parameters.runProvision }}', 'true'))
+    pool:
+      name: ${{ parameters.agentPool }}
+    jobs:
+    - job: provision
+      timeoutInMinutes: 30
+      steps:
+      - task: AzureCLI@2
+        name: coords
+        displayName: 'Resolve coordinates and pre-flight checks (DEPLOYMENT.md §1.1, §2.2, §4)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            ENV="${{ parameters.environment }}"
+            SLOT="${{ parameters.slot }}"
+            RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
+            APP="fa-${ENV}-${SLOT}-pcrrelay"
+            PLAN="as-${ENV}-${SLOT}-hearingres"
+            STORAGE="sa${ENV}${SLOT}hearingres"   # DEPLOYMENT.md §4: "verify — naming is not perfectly regular"
+            AI="ai-${ENV}-${SLOT}-hearingres"
+            TOPIC_NAME="eg-${ENV}-${SLOT}-hearingres"
+
+            echo "##vso[task.setvariable variable=RG;isOutput=true]$RG"
+            echo "##vso[task.setvariable variable=APP;isOutput=true]$APP"
+            echo "##vso[task.setvariable variable=PLAN;isOutput=true]$PLAN"
+            echo "##vso[task.setvariable variable=STORAGE;isOutput=true]$STORAGE"
+            echo "##vso[task.setvariable variable=AI;isOutput=true]$AI"
+            echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]$TOPIC_NAME"
+
+            # DEPLOYMENT.md §2.2: plans can't mix OS, so check Linux before anything else uses it.
+            RESERVED=$(az appservice plan show -g "$RG" -n "$PLAN" --query reserved -o tsv 2>/dev/null || echo "MISSING")
+            if [ "$RESERVED" != "true" ]; then
+              echo "##vso[task.logissue type=error]App Service plan $PLAN missing or not Linux (reserved=$RESERVED). Java 25 needs Linux; do not let this create a new plan."
+              exit 1
+            fi
+
+            # Not every slot has a topic (DEPLOYMENT.md §2.2).
+            if ! az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" &>/dev/null; then
+              echo "##vso[task.logissue type=error]Topic $TOPIC_NAME does not exist in $RG — nothing to subscribe to."
+              exit 1
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Create the Function App if it does not already exist (DEPLOYMENT.md §4.1)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"; PLAN="$(coords.PLAN)"
+            STORAGE="$(coords.STORAGE)"; AI="$(coords.AI)"
+            ENV="${{ parameters.environment }}"
+
+            if az functionapp show -g "$RG" -n "$APP" &>/dev/null; then
+              echo "Function App $APP already exists — skipping creation."
+            else
+              # --runtime-version 25.0 (not 25), --tags with all four required
+              # keys, --os-type Linux: each documented in DEPLOYMENT.md §4.1 as a
+              # flag that fails the *whole* call with a misleading error if wrong.
+              az functionapp create -g "$RG" -n "$APP" \
+                --plan "$PLAN" \
+                --storage-account "$STORAGE" \
+                --runtime java --runtime-version 25.0 --functions-version 4 --os-type Linux \
+                --app-insights "$AI" \
+                --tags environment="$ENV" application=CP businessArea=crime builtFrom=Functionapp
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'VNet integration (DEPLOYMENT.md §4.2 — required, easy to miss)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"
+            ENV="${{ parameters.environment }}"; SLOT="${{ parameters.slot }}"
+
+            EXISTING=$(az functionapp show -g "$RG" -n "$APP" --query properties.virtualNetworkSubnetId -o tsv)
+            if [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ]; then
+              echo "VNet integration already present — skipping."
+            else
+              # Deliberately copies the sibling prisoncourtreg app's subnet — all
+              # apps on one plan must share a subnet, and the plan is already
+              # joined, so this consumes no extra addresses (DEPLOYMENT.md §4.2).
+              SUBNET_ID=$(az resource show -g "$RG" -n "fa-${ENV}-${SLOT}-prisoncourtreg" \
+                --resource-type Microsoft.Web/sites --query properties.virtualNetworkSubnetId -o tsv)
+              az functionapp vnet-integration add -g "$RG" -n "$APP" \
+                --vnet "$(dirname "$(dirname "$SUBNET_ID")")" \
+                --subnet "$(basename "$SUBNET_ID")"
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Static application settings (DEPLOYMENT.md §4.3)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"
+            az functionapp config appsettings set -g "$RG" -n "$APP" --settings \
+              PCR_SERVICE_INGESTION_ENDPOINT="$(pcrServiceIngestionEndpoint)" \
+              PCR_SERVICE_CA_BUNDLE_PATH=/home/site/wwwroot/internal_ca_certs.pem \
+              FORWARD_MAX_ATTEMPTS=3 \
+              FORWARD_RETRY_DELAY_IN_SECONDS=2
+
+      - task: AzureCLI@2
+        displayName: 'Verify function registered before wiring the subscription (DEPLOYMENT.md §5.1)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"
+            # Must pass before wiring the subscription — Event Grid validates the target
+            # function exists. Queries the host's own /admin/functions directly rather than
+            # ARM's function-list proxy — see the Deploy-stage verify step for why.
+            MASTER_KEY=$(az functionapp keys list -g "$RG" -n "$APP" --query masterKey -o tsv)
+            for i in $(seq 1 20); do
+              if curl -sf "https://${APP}.azurewebsites.net/admin/functions?code=${MASTER_KEY}" \
+                  | grep -q '"name": *"PrisonCourtRegisterHearingResulted"'; then
+                echo "Function registered."
+                exit 0
+              fi
+              echo "Not registered yet — retrying in 15s..."
+              sleep 15
+            done
+            echo "##vso[task.logissue type=error]Function never registered — the app has no deployed code yet. Run the Deploy stage first."
+            exit 1
+
+      - task: AzureCLI@2
+        displayName: 'Wire the Event Grid subscription — LIVE EVENTS START FLOWING (DEPLOYMENT.md §6)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"; TOPIC_NAME="$(coords.TOPIC_NAME)"
+            TOPIC=$(az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" --query id -o tsv)
+
+            if az eventgrid event-subscription show --name egs-pcr-relay --source-resource-id "$TOPIC" &>/dev/null; then
+              echo "Subscription egs-pcr-relay already exists — skipping."
+              exit 0
+            fi
+
+            FN="$(az functionapp show -g "$RG" -n "$APP" --query id -o tsv)/functions/PrisonCourtRegisterHearingResulted"
+
+            # --included-event-types Hearing_Resulted is required for correctness: the topic
+            # also carries Hearing_Resulted_Complex, which PCR rejects with a non-retryable
+            # 400. Without --deadletter-endpoint, a failing event is silently discarded
+            # after 24h (DEPLOYMENT.md §6).
+            az eventgrid event-subscription create \
+              --name egs-pcr-relay \
+              --source-resource-id "$TOPIC" \
+              --endpoint-type azurefunction --endpoint "$FN" \
+              --included-event-types Hearing_Resulted \
+              --max-delivery-attempts 30 --event-ttl 1440 \
+              --deadletter-endpoint "$(deadletterStorageResourceId)/blobServices/default/containers/pcr-relay-deadletter"
+
+  # Deploy — routine, runs on every release. Never touches the Event Grid subscription or
+  # creates the app; both are Provision-only. Implements design.md §2.1/§3.1.
+  - stage: Deploy
+    dependsOn: []
+    condition: always()
+    pool:
+      name: ${{ parameters.agentPool }}
+    jobs:
+    - job: deploy
+      timeoutInMinutes: 20
+      steps:
+      - task: AzureCLI@2
+        name: coords
+        displayName: 'Resolve coordinates'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            ENV="${{ parameters.environment }}"; SLOT="${{ parameters.slot }}"
+            echo "##vso[task.setvariable variable=RG;isOutput=true]RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
+            echo "##vso[task.setvariable variable=APP;isOutput=true]fa-${ENV}-${SLOT}-pcrrelay"
+
+      # design.md §2.1: the artefact is a GitHub Release asset (immutable, versioned) —
+      # Actions artifacts expire after 90 days.
+      - bash: |
+          set -euo pipefail
+          mkdir -p "$(Pipeline.Workspace)/package"
+          TAG="v${{ parameters.artefactVersion }}"
+          echo "Downloading release asset for $TAG from ${{ parameters.targetRepository }}"
+
+          ASSET_URL=$(curl -sf -H "Authorization: Bearer $(githubToken)" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ parameters.targetRepository }}/releases/tags/$TAG" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print([a['url'] for a in d['assets'] if a['name'].endswith('.zip')][0])")
+
+          curl -sfL -H "Authorization: Bearer $(githubToken)" \
+            -H "Accept: application/octet-stream" \
+            -o "$(Pipeline.Workspace)/package/pcr-eventgrid-relay-function.zip" \
+            "$ASSET_URL"
+
+          test -s "$(Pipeline.Workspace)/package/pcr-eventgrid-relay-function.zip" \
+            || { echo "##vso[task.logissue type=error]Downloaded asset is empty or missing"; exit 1; }
+        displayName: 'Download the GitHub Release asset (design.md §2.1)'
+
+      # design.md §3.1: the WEBSITE_RUN_FROM_PACKAGE cut-over, done via zipDeploy so deploy
+      # and cut-over happen as one operation rather than leaving the app briefly codeless.
+      - task: AzureFunctionApp@2
+        displayName: 'Deploy to Azure Functions (zipDeploy — design.md §3.1 cut-over)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          appType: functionAppLinux
+          appName: $(coords.APP)
+          resourceGroupName: $(coords.RG)
+          package: '$(Pipeline.Workspace)/package/pcr-eventgrid-relay-function.zip'
+          deploymentMethod: zipDeploy
+
+      # On a VNet-integrated app, AzureFunctionApp@2 falls back to a Kudu zip-extract deploy
+      # (WEBSITE_RUN_FROM_PACKAGE=0) rather than the blob-mount run-from-package URL it uses on
+      # a non-VNet app, and the automatic post-deploy trigger sync on that path can take far
+      # longer than the verify step's retry budget — force it explicitly instead.
+      - task: AzureCLI@2
+        displayName: 'Force function trigger sync'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            SUB_ID=$(az account show --query id -o tsv)
+            az resource invoke-action --action syncfunctiontriggers --api-version 2022-03-01 \
+              --ids "/subscriptions/$SUB_ID/resourceGroups/$(coords.RG)/providers/Microsoft.Web/sites/$(coords.APP)"
+
+      # Lifted from the legacy-app deploy pipeline's PROJECT_VERSION pattern: makes "what
+      # version is actually live" a one-line `az functionapp config appsettings list` away.
+      - task: AzureCLI@2
+        displayName: 'Record deployed version'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az functionapp config appsettings set -g "$(coords.RG)" -n "$(coords.APP)" \
+              --settings DEPLOYED_ARTEFACT_VERSION="${{ parameters.artefactVersion }}"
+
+      - task: AzureCLI@2
+        displayName: 'Verify function registered (DEPLOYMENT.md §5.1)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"
+            # `az functionapp function list` goes through ARM's control-plane proxy, which lags
+            # well behind actual host readiness (observed 8-20+ min after the Kudu deployment
+            # record already showed the zip active within seconds). Querying the host's own
+            # /admin/functions directly reflects reality immediately.
+            MASTER_KEY=$(az functionapp keys list -g "$RG" -n "$APP" --query masterKey -o tsv)
+            for i in $(seq 1 20); do
+              if curl -sf "https://${APP}.azurewebsites.net/admin/functions?code=${MASTER_KEY}" \
+                  | grep -q '"name": *"PrisonCourtRegisterHearingResulted"'; then
+                echo "Function registered — deploy verified."
+                exit 0
+              fi
+              echo "Not registered yet — retrying in 15s..."
+              sleep 15
+            done
+            echo "##vso[task.logissue type=error]Function never registered after deploy."
+            exit 1

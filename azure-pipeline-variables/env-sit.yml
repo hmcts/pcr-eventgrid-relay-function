@@ -1,0 +1,8 @@
+variables:
+# Genuinely unconfirmed — do NOT assume this matches dev/ste's devamp01 value. That value only
+# turned out correct for dev/ste because ns-dev-amp-01 secretly backs steccm64; SIT has no such
+# established connection to that shared amp tier. Confirm the real ingress host before using.
+- name: pcrServiceIngestionEndpoint
+  value: "https://REPLACE_WITH_REAL_SIT_INGRESS_HOST/pcr/internal/hearing-results"
+- name: deadletterStorageResourceId
+  value: "REPLACE_WITH_REAL_SIT_STORAGE_ACCOUNT_RESOURCE_ID"
