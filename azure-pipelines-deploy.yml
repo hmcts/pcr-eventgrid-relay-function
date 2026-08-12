@@ -83,6 +83,14 @@ stages:
   # Provision — one-time, manual-gated. DEPLOYMENT.md §4 (create app + VNet integration +
   # static settings) and §6 (Event Grid subscription). Idempotency checks are this
   # pipeline's own addition; the doc's commands assume a fresh resource group.
+  #
+  # On a genuinely new slot, this stage legitimately fails at its own "verify function
+  # registered" step on the first run — there's no code yet, since Deploy (which depends on
+  # this stage, see below) hasn't had a chance to run. That's expected, not a bug: bootstrapping
+  # a brand-new slot takes three separate triggers — (1) runProvision=true creates the
+  # app/plan/AI/VNet/settings, reporting Failed at verify (fine, infra is up); (2)
+  # runProvision=false deploys code now that the app exists; (3) runProvision=true again
+  # succeeds all the way through and wires the subscription, since code is now really there.
   - stage: Provision
     condition: and(eq(variables['Build.Reason'], 'Manual'), eq('${{ parameters.runProvision }}', 'true'))
     pool:
@@ -298,9 +306,15 @@ stages:
 
   # Deploy — routine, runs on every release. Never touches the Event Grid subscription or
   # creates the app; both are Provision-only. Implements design.md §2.1/§3.1.
+  #
+  # Explicitly depends on Provision rather than running concurrently with it: on a genuinely
+  # new slot, Provision's plan/app-creation chain takes far longer than Deploy's download step,
+  # so an unordered run would have Deploy try to zipDeploy before the app exists. Proceeds if
+  # Provision succeeded OR was skipped (the normal runProvision=false case), but not if it
+  # failed — a broken provision shouldn't be followed by a deploy attempt.
   - stage: Deploy
-    dependsOn: []
-    condition: always()
+    dependsOn: Provision
+    condition: in(dependencies.Provision.result, 'Succeeded', 'Skipped')
     pool:
       name: ${{ parameters.agentPool }}
     jobs:
