@@ -104,13 +104,14 @@ stages:
             SLOT="${{ parameters.slot }}"
             RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
             APP="fa-${ENV}-${SLOT}-pcrrelay"
-            # Confirmed with the platform team: PCR relay gets its own dedicated plan and App
-            # Insights (1:1), not the shared *-hearingres ones the other siblings sometimes use
-            # — that sharing turned out to be inconsistent across slots anyway (some have a
-            # shared plan, some don't; independently true for App Insights too).
+            # Confirmed with the platform team: PCR relay gets its own dedicated plan (1:1), not
+            # the shared *-hearingres one other siblings sometimes use — confirmed inconsistent
+            # across slots anyway (some have a shared plan, some don't). App Insights is
+            # different: it IS meant to be shared (like the topic below) — most real slots
+            # checked have the siblings sharing one ai-*-hearingres instance.
             PLAN="as-${ENV}-${SLOT}-pcrrelay"
             STORAGE="sa${ENV}${SLOT}hearingres"   # DEPLOYMENT.md §4: "verify — naming is not perfectly regular"
-            AI="ai-${ENV}-${SLOT}-pcrrelay"
+            AI="ai-${ENV}-${SLOT}-hearingres"
             TOPIC_NAME="eg-${ENV}-${SLOT}-hearingres"
 
             echo "##vso[task.setvariable variable=RG;isOutput=true]$RG"
@@ -130,8 +131,7 @@ stages:
             fi
 
             # Not every slot has a topic (DEPLOYMENT.md §2.2) — this one IS shared/estate-owned,
-            # unlike the plan/App Insights, so it's still a hard prerequisite, not something this
-            # pipeline creates.
+            # unlike the plan, so it's still a hard prerequisite this pipeline never creates.
             if ! az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" &>/dev/null; then
               echo "##vso[task.logissue type=error]Topic $TOPIC_NAME does not exist in $RG — nothing to subscribe to."
               exit 1
