@@ -104,9 +104,13 @@ stages:
             SLOT="${{ parameters.slot }}"
             RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
             APP="fa-${ENV}-${SLOT}-pcrrelay"
-            PLAN="as-${ENV}-${SLOT}-hearingres"
+            # Confirmed with the platform team: PCR relay gets its own dedicated plan and App
+            # Insights (1:1), not the shared *-hearingres ones the other siblings sometimes use
+            # — that sharing turned out to be inconsistent across slots anyway (some have a
+            # shared plan, some don't; independently true for App Insights too).
+            PLAN="as-${ENV}-${SLOT}-pcrrelay"
             STORAGE="sa${ENV}${SLOT}hearingres"   # DEPLOYMENT.md §4: "verify — naming is not perfectly regular"
-            AI="ai-${ENV}-${SLOT}-hearingres"
+            AI="ai-${ENV}-${SLOT}-pcrrelay"
             TOPIC_NAME="eg-${ENV}-${SLOT}-hearingres"
 
             echo "##vso[task.setvariable variable=RG;isOutput=true]$RG"
@@ -116,17 +120,59 @@ stages:
             echo "##vso[task.setvariable variable=AI;isOutput=true]$AI"
             echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]$TOPIC_NAME"
 
-            # DEPLOYMENT.md §2.2: plans can't mix OS, so check Linux before anything else uses it.
-            RESERVED=$(az appservice plan show -g "$RG" -n "$PLAN" --query reserved -o tsv 2>/dev/null || echo "MISSING")
-            if [ "$RESERVED" != "true" ]; then
-              echo "##vso[task.logissue type=error]App Service plan $PLAN missing or not Linux (reserved=$RESERVED). Java 25 needs Linux; do not let this create a new plan."
+            # A missing dedicated plan is normal on first provision (the next step creates it) —
+            # only an existing-but-wrong-OS plan is an error, since a plan can't mix OS and this
+            # pipeline must never silently recreate one to "fix" that.
+            RESERVED=$(az appservice plan show -g "$RG" -n "$PLAN" --query reserved -o tsv 2>/dev/null || echo "")
+            if [ -n "$RESERVED" ] && [ "$RESERVED" != "true" ]; then
+              echo "##vso[task.logissue type=error]App Service plan $PLAN exists but is not Linux (reserved=$RESERVED). Java 25 needs Linux, and a plan can't mix OS."
               exit 1
             fi
 
-            # Not every slot has a topic (DEPLOYMENT.md §2.2).
+            # Not every slot has a topic (DEPLOYMENT.md §2.2) — this one IS shared/estate-owned,
+            # unlike the plan/App Insights, so it's still a hard prerequisite, not something this
+            # pipeline creates.
             if ! az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" &>/dev/null; then
               echo "##vso[task.logissue type=error]Topic $TOPIC_NAME does not exist in $RG — nothing to subscribe to."
               exit 1
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Create the App Service Plan if it does not already exist'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; PLAN="$(coords.PLAN)"
+            ENV="${{ parameters.environment }}"
+
+            if az appservice plan show -g "$RG" -n "$PLAN" &>/dev/null; then
+              echo "Plan $PLAN already exists — skipping creation."
+            else
+              LOCATION=$(az group show -n "$RG" --query location -o tsv)
+              az functionapp plan create -g "$RG" -n "$PLAN" -l "$LOCATION" --is-linux --sku EP3 \
+                --tags environment="$ENV" application=CP businessArea=crime builtFrom=Functionapp
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Create Application Insights if it does not already exist'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; AI="$(coords.AI)"
+            ENV="${{ parameters.environment }}"
+
+            if az monitor app-insights component show -g "$RG" -a "$AI" &>/dev/null; then
+              echo "Application Insights $AI already exists — skipping creation."
+            else
+              LOCATION=$(az group show -n "$RG" --query location -o tsv)
+              az monitor app-insights component create -g "$RG" -a "$AI" -l "$LOCATION" --application-type web \
+                --tags environment="$ENV" application=CP businessArea=crime builtFrom=Functionapp
             fi
 
       - task: AzureCLI@2
