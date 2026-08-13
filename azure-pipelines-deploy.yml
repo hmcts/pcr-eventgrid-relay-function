@@ -60,19 +60,22 @@ parameters:
   type: boolean
   default: false
 # DEPLOYMENT.md §6 calls this "the point of no return" — live events start flowing
-# immediately. Deliberately a separate parameter from runProvision: wiring the subscription
-# is a distinct decision from creating infrastructure, made once code is confirmed deployed
-# (this stage depends on Deploy having actually succeeded, not just been skipped).
-- name: runWireSubscription
-  displayName: "Wire the Event Grid subscription (live events start flowing)"
+# immediately. Deliberately a separate parameter from runProvision: activating the
+# subscription is a distinct decision from creating infrastructure, made once code is
+# confirmed deployed (this stage depends on Deploy having actually succeeded, not just
+# been skipped).
+- name: runActivateSubscription
+  displayName: "Activate the Event Grid subscription (live events start flowing)"
   type: boolean
   default: false
 
 variables:
 # azureServiceConnection is platform-scoped (nonlive vs live).
 - template: azure-pipeline-variables/${{ parameters.platform }}.yml
-# pcrServiceIngestionEndpoint/deadletterStorageResourceId are per-environment, not
-# per-platform — each of dev/sit/ste has a genuinely different ingress host.
+# pcrServiceIngestionEndpoint is per-environment, not per-platform or per-slot — each of
+# dev/sit/ste has a genuinely different ingress host, but all slots within one environment
+# share it (unlike the dead-letter storage account, which ActivateSubscription resolves
+# per-slot itself rather than reading a static value here).
 - template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
 # githubToken: fine-grained PAT (Contents:Read-only on this repo only) used below to
 # download the GitHub Release asset (design.md §2.1).
@@ -92,8 +95,8 @@ stages:
   # assume a fresh resource group.
   #
   # Deliberately stops short of the Event Grid subscription (DEPLOYMENT.md §6) — that's the
-  # WireSubscription stage, gated by its own parameter. Keeping infra creation and subscription
-  # wiring in one stage meant a brand-new slot's first run legitimately failed at "verify
+  # ActivateSubscription stage, gated by its own parameter. Keeping infra creation and
+  # activation in one stage meant a brand-new slot's first run legitimately failed at "verify
   # function registered" (no code yet, since Deploy hadn't run), which reads as a broken
   # pipeline in build history even though it isn't. Splitting them means a first-time
   # runProvision=true run just creates infra and succeeds — Deploy follows immediately after.
@@ -374,19 +377,19 @@ stages:
             echo "##vso[task.logissue type=error]Function never registered after deploy."
             exit 1
 
-  # Wire the Event Grid subscription (DEPLOYMENT.md §6) — "the point of no return," live events
-  # start flowing immediately. Deliberately its own stage/parameter rather than part of
+  # Activate the Event Grid subscription (DEPLOYMENT.md §6) — "the point of no return," live
+  # events start flowing immediately. Deliberately its own stage/parameter rather than part of
   # Provision: depends on Deploy having actually Succeeded (not just Skipped), so it's
-  # structurally impossible to wire a subscription to an app with no confirmed-registered code.
-  # Resolves its own coordinates rather than reading Provision's outputs, same reason Deploy
-  # does — Provision may not have run in this trigger at all.
-  - stage: WireSubscription
+  # structurally impossible to activate a subscription for an app with no confirmed-registered
+  # code. Resolves its own coordinates rather than reading Provision's outputs, same reason
+  # Deploy does — Provision may not have run in this trigger at all.
+  - stage: ActivateSubscription
     dependsOn: Deploy
-    condition: and(eq('${{ parameters.runWireSubscription }}', 'true'), eq(dependencies.Deploy.result, 'Succeeded'))
+    condition: and(eq('${{ parameters.runActivateSubscription }}', 'true'), eq(dependencies.Deploy.result, 'Succeeded'))
     pool:
       name: ${{ parameters.agentPool }}
     jobs:
-    - job: wireSubscription
+    - job: activateSubscription
       timeoutInMinutes: 10
       steps:
       - task: AzureCLI@2
@@ -399,9 +402,12 @@ stages:
           inlineScript: |
             set -euo pipefail
             ENV="${{ parameters.environment }}"; SLOT="${{ parameters.slot }}"
-            echo "##vso[task.setvariable variable=RG;isOutput=true]RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
+            RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
+            STORAGE="sa${ENV}${SLOT}hearingres"
+            echo "##vso[task.setvariable variable=RG;isOutput=true]$RG"
             echo "##vso[task.setvariable variable=APP;isOutput=true]fa-${ENV}-${SLOT}-pcrrelay"
             echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]eg-${ENV}-${SLOT}-hearingres"
+            echo "##vso[task.setvariable variable=STORAGE;isOutput=true]$STORAGE"
 
       - task: AzureCLI@2
         displayName: 'Create the dead-letter container if it does not already exist'
@@ -411,15 +417,20 @@ stages:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-            # deadletterStorageResourceId names the account; az eventgrid event-subscription
-            # create does not create the target container itself, so a slot whose dead-letter
-            # storage account has never hosted this container before would otherwise fail at
-            # the wiring step below.
-            STORAGE_ACCOUNT=$(basename "$(deadletterStorageResourceId)")
-            if az storage container show --account-name "$STORAGE_ACCOUNT" --name pcr-relay-deadletter --auth-mode login &>/dev/null; then
-              echo "Container pcr-relay-deadletter already exists on $STORAGE_ACCOUNT — skipping."
+            # The dead-letter destination is this slot's own shared *-hearingres storage
+            # account — same one Deploy's Function App already sits on — resolved the same
+            # way RG/APP/TOPIC_NAME are, not a static per-environment value. A static value
+            # here previously pointed every slot in an environment at the SAME (wrong) real
+            # storage account, discovered when a CCP0122 test wired against CCP0121's real
+            # dead-letter container instead of its own.
+            #
+            # az eventgrid event-subscription create does not create the target container
+            # itself, so a slot whose dead-letter storage account has never hosted this
+            # container before would otherwise fail at the wiring step below.
+            if az storage container show --account-name "$(coords.STORAGE)" --name pcr-relay-deadletter --auth-mode login &>/dev/null; then
+              echo "Container pcr-relay-deadletter already exists on $(coords.STORAGE) — skipping."
             else
-              az storage container create --account-name "$STORAGE_ACCOUNT" --name pcr-relay-deadletter --auth-mode login
+              az storage container create --account-name "$(coords.STORAGE)" --name pcr-relay-deadletter --auth-mode login
             fi
 
       - task: AzureCLI@2
@@ -439,6 +450,7 @@ stages:
             fi
 
             FN="$(az functionapp show -g "$RG" -n "$APP" --query id -o tsv)/functions/PrisonCourtRegisterHearingResulted"
+            DEADLETTER_STORAGE_ID=$(az storage account show --name "$(coords.STORAGE)" -g "$RG" --query id -o tsv)
 
             # --included-event-types Hearing_Resulted is required for correctness: the topic
             # also carries Hearing_Resulted_Complex, which PCR rejects with a non-retryable
@@ -450,4 +462,4 @@ stages:
               --endpoint-type azurefunction --endpoint "$FN" \
               --included-event-types Hearing_Resulted \
               --max-delivery-attempts 30 --event-ttl 1440 \
-              --deadletter-endpoint "$(deadletterStorageResourceId)/blobServices/default/containers/pcr-relay-deadletter"
+              --deadletter-endpoint "$DEADLETTER_STORAGE_ID/blobServices/default/containers/pcr-relay-deadletter"
