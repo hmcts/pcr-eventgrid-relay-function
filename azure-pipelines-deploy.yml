@@ -404,6 +404,25 @@ stages:
             echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]eg-${ENV}-${SLOT}-hearingres"
 
       - task: AzureCLI@2
+        displayName: 'Create the dead-letter container if it does not already exist'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            # deadletterStorageResourceId names the account; az eventgrid event-subscription
+            # create does not create the target container itself, so a slot whose dead-letter
+            # storage account has never hosted this container before would otherwise fail at
+            # the wiring step below.
+            STORAGE_ACCOUNT=$(basename "$(deadletterStorageResourceId)")
+            if az storage container show --account-name "$STORAGE_ACCOUNT" --name pcr-relay-deadletter --auth-mode login &>/dev/null; then
+              echo "Container pcr-relay-deadletter already exists on $STORAGE_ACCOUNT — skipping."
+            else
+              az storage container create --account-name "$STORAGE_ACCOUNT" --name pcr-relay-deadletter --auth-mode login
+            fi
+
+      - task: AzureCLI@2
         displayName: 'Wire the Event Grid subscription — LIVE EVENTS START FLOWING (DEPLOYMENT.md §6)'
         inputs:
           azureSubscription: ${{ variables.azureServiceConnection }}
