@@ -53,19 +53,22 @@ parameters:
   - "ubuntu-ado-agents-mdv"
   - "ubuntu-ado-agents-mpd"
   default: "ubuntu-ado-agents-mdv"
-# Creates the app, VNet integration, and Event Grid subscription. DEPLOYMENT.md §6 calls the
-# subscription step "the point of no return" — live events start flowing immediately. Leave
-# false for every routine deploy.
+# Creates the plan/App Insights/app/VNet integration/settings — everything short of the
+# Event Grid subscription. Leave false for every routine deploy.
 - name: runProvision
   displayName: "Run provisioning"
+  type: boolean
+  default: false
+- name: runActivateSubscription
+  displayName: "Activate the Event Grid subscription (live events start flowing)"
   type: boolean
   default: false
 
 variables:
 # azureServiceConnection is platform-scoped (nonlive vs live).
 - template: azure-pipeline-variables/${{ parameters.platform }}.yml
-# pcrServiceIngestionEndpoint/deadletterStorageResourceId are per-environment, not
-# per-platform — each of dev/sit/ste has a genuinely different ingress host.
+# pcrServiceIngestionEndpoint is per-environment — each of dev/sit/ste has a different
+# ingress host, shared across all slots in that environment.
 - template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
 # githubToken: fine-grained PAT (Contents:Read-only on this repo only) used below to
 # download the GitHub Release asset (design.md §2.1).
@@ -80,9 +83,10 @@ resources:
     endpoint: 'hmcts'
 
 stages:
-  # Provision — one-time, manual-gated. DEPLOYMENT.md §4 (create app + VNet integration +
-  # static settings) and §6 (Event Grid subscription). Idempotency checks are this
-  # pipeline's own addition; the doc's commands assume a fresh resource group.
+  # Provision — one-time, manual-gated. DEPLOYMENT.md §4: create app + VNet integration +
+  # static settings. Idempotency checks are this pipeline's own addition; the doc's commands
+  # assume a fresh resource group. Deliberately stops short of the Event Grid subscription
+  # (DEPLOYMENT.md §6) — see the ActivateSubscription stage for that.
   - stage: Provision
     condition: and(eq(variables['Build.Reason'], 'Manual'), eq('${{ parameters.runProvision }}', 'true'))
     pool:
@@ -104,7 +108,10 @@ stages:
             SLOT="${{ parameters.slot }}"
             RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
             APP="fa-${ENV}-${SLOT}-pcrrelay"
-            PLAN="as-${ENV}-${SLOT}-hearingres"
+            # Plan is dedicated to PCR relay (1:1); App Insights is shared with siblings, like
+            # the topic below — sharing conventions for these two resources are independent
+            # and not implied by each other across the estate.
+            PLAN="as-${ENV}-${SLOT}-pcrrelay"
             STORAGE="sa${ENV}${SLOT}hearingres"   # DEPLOYMENT.md §4: "verify — naming is not perfectly regular"
             AI="ai-${ENV}-${SLOT}-hearingres"
             TOPIC_NAME="eg-${ENV}-${SLOT}-hearingres"
@@ -116,17 +123,58 @@ stages:
             echo "##vso[task.setvariable variable=AI;isOutput=true]$AI"
             echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]$TOPIC_NAME"
 
-            # DEPLOYMENT.md §2.2: plans can't mix OS, so check Linux before anything else uses it.
-            RESERVED=$(az appservice plan show -g "$RG" -n "$PLAN" --query reserved -o tsv 2>/dev/null || echo "MISSING")
-            if [ "$RESERVED" != "true" ]; then
-              echo "##vso[task.logissue type=error]App Service plan $PLAN missing or not Linux (reserved=$RESERVED). Java 25 needs Linux; do not let this create a new plan."
+            # A missing dedicated plan is normal on first provision (the next step creates it) —
+            # only an existing-but-wrong-OS plan is an error, since a plan can't mix OS and this
+            # pipeline must never silently recreate one to "fix" that.
+            RESERVED=$(az appservice plan show -g "$RG" -n "$PLAN" --query reserved -o tsv 2>/dev/null || echo "")
+            if [ -n "$RESERVED" ] && [ "$RESERVED" != "true" ]; then
+              echo "##vso[task.logissue type=error]App Service plan $PLAN exists but is not Linux (reserved=$RESERVED). Java 25 needs Linux, and a plan can't mix OS."
               exit 1
             fi
 
-            # Not every slot has a topic (DEPLOYMENT.md §2.2).
+            # Not every slot has a topic (DEPLOYMENT.md §2.2) — this one IS shared/estate-owned,
+            # unlike the plan, so it's still a hard prerequisite this pipeline never creates.
             if ! az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" &>/dev/null; then
               echo "##vso[task.logissue type=error]Topic $TOPIC_NAME does not exist in $RG — nothing to subscribe to."
               exit 1
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Create the App Service Plan if it does not already exist'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; PLAN="$(coords.PLAN)"
+            ENV="${{ parameters.environment }}"
+
+            if az appservice plan show -g "$RG" -n "$PLAN" &>/dev/null; then
+              echo "Plan $PLAN already exists — skipping creation."
+            else
+              LOCATION=$(az group show -n "$RG" --query location -o tsv)
+              az functionapp plan create -g "$RG" -n "$PLAN" -l "$LOCATION" --is-linux --sku EP3 \
+                --tags environment="$ENV" application=CP businessArea=crime builtFrom=Functionapp
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Create Application Insights if it does not already exist'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; AI="$(coords.AI)"
+            ENV="${{ parameters.environment }}"
+
+            if az monitor app-insights component show -g "$RG" -a "$AI" &>/dev/null; then
+              echo "Application Insights $AI already exists — skipping creation."
+            else
+              LOCATION=$(az group show -n "$RG" --query location -o tsv)
+              az monitor app-insights component create -g "$RG" -a "$AI" -l "$LOCATION" --application-type web \
+                --tags environment="$ENV" application=CP businessArea=crime builtFrom=Functionapp
             fi
 
       - task: AzureCLI@2
@@ -195,66 +243,13 @@ stages:
               FORWARD_MAX_ATTEMPTS=3 \
               FORWARD_RETRY_DELAY_IN_SECONDS=2
 
-      - task: AzureCLI@2
-        displayName: 'Verify function registered before wiring the subscription (DEPLOYMENT.md §5.1)'
-        inputs:
-          azureSubscription: ${{ variables.azureServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-            RG="$(coords.RG)"; APP="$(coords.APP)"
-            # Must pass before wiring the subscription — Event Grid validates the target
-            # function exists. Queries the host's own /admin/functions directly rather than
-            # ARM's function-list proxy — see the Deploy-stage verify step for why.
-            MASTER_KEY=$(az functionapp keys list -g "$RG" -n "$APP" --query masterKey -o tsv)
-            for i in $(seq 1 20); do
-              if curl -sf "https://${APP}.azurewebsites.net/admin/functions?code=${MASTER_KEY}" \
-                  | grep -q '"name": *"PrisonCourtRegisterHearingResulted"'; then
-                echo "Function registered."
-                exit 0
-              fi
-              echo "Not registered yet — retrying in 15s..."
-              sleep 15
-            done
-            echo "##vso[task.logissue type=error]Function never registered — the app has no deployed code yet. Run the Deploy stage first."
-            exit 1
-
-      - task: AzureCLI@2
-        displayName: 'Wire the Event Grid subscription — LIVE EVENTS START FLOWING (DEPLOYMENT.md §6)'
-        inputs:
-          azureSubscription: ${{ variables.azureServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-            RG="$(coords.RG)"; APP="$(coords.APP)"; TOPIC_NAME="$(coords.TOPIC_NAME)"
-            TOPIC=$(az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" --query id -o tsv)
-
-            if az eventgrid event-subscription show --name egs-pcr-relay --source-resource-id "$TOPIC" &>/dev/null; then
-              echo "Subscription egs-pcr-relay already exists — skipping."
-              exit 0
-            fi
-
-            FN="$(az functionapp show -g "$RG" -n "$APP" --query id -o tsv)/functions/PrisonCourtRegisterHearingResulted"
-
-            # --included-event-types Hearing_Resulted is required for correctness: the topic
-            # also carries Hearing_Resulted_Complex, which PCR rejects with a non-retryable
-            # 400. Without --deadletter-endpoint, a failing event is silently discarded
-            # after 24h (DEPLOYMENT.md §6).
-            az eventgrid event-subscription create \
-              --name egs-pcr-relay \
-              --source-resource-id "$TOPIC" \
-              --endpoint-type azurefunction --endpoint "$FN" \
-              --included-event-types Hearing_Resulted \
-              --max-delivery-attempts 30 --event-ttl 1440 \
-              --deadletter-endpoint "$(deadletterStorageResourceId)/blobServices/default/containers/pcr-relay-deadletter"
-
   # Deploy — routine, runs on every release. Never touches the Event Grid subscription or
-  # creates the app; both are Provision-only. Implements design.md §2.1/§3.1.
+  # creates the app; both are Provision-only. Implements design.md §2.1/§3.1. Depends on
+  # Provision (succeeded or skipped, not failed) rather than running concurrently, so it
+  # never tries to deploy before the app exists.
   - stage: Deploy
-    dependsOn: []
-    condition: always()
+    dependsOn: Provision
+    condition: in(dependencies.Provision.result, 'Succeeded', 'Skipped')
     pool:
       name: ${{ parameters.agentPool }}
     jobs:
@@ -347,9 +342,8 @@ stages:
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
             # `az functionapp function list` goes through ARM's control-plane proxy, which lags
-            # well behind actual host readiness (observed 8-20+ min after the Kudu deployment
-            # record already showed the zip active within seconds). Querying the host's own
-            # /admin/functions directly reflects reality immediately.
+            # well behind actual host readiness. Querying the host's own /admin/functions
+            # directly reflects reality immediately.
             MASTER_KEY=$(az functionapp keys list -g "$RG" -n "$APP" --query masterKey -o tsv)
             for i in $(seq 1 20); do
               if curl -sf "https://${APP}.azurewebsites.net/admin/functions?code=${MASTER_KEY}" \
@@ -362,3 +356,84 @@ stages:
             done
             echo "##vso[task.logissue type=error]Function never registered after deploy."
             exit 1
+
+  # Activate the Event Grid subscription (DEPLOYMENT.md §6) — "the point of no return," live
+  # events start flowing immediately. Depends on Deploy having actually Succeeded (not just
+  # Skipped), so a subscription can't be activated for an app with no confirmed-registered
+  # code. Resolves its own coordinates rather than reading Provision's outputs, since
+  # Provision may not have run in this trigger at all.
+  - stage: ActivateSubscription
+    dependsOn: Deploy
+    condition: and(eq('${{ parameters.runActivateSubscription }}', 'true'), eq(dependencies.Deploy.result, 'Succeeded'))
+    pool:
+      name: ${{ parameters.agentPool }}
+    jobs:
+    - job: activateSubscription
+      timeoutInMinutes: 10
+      steps:
+      - task: AzureCLI@2
+        name: coords
+        displayName: 'Resolve coordinates'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            ENV="${{ parameters.environment }}"; SLOT="${{ parameters.slot }}"
+            RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
+            STORAGE="sa${ENV}${SLOT}hearingres"
+            echo "##vso[task.setvariable variable=RG;isOutput=true]$RG"
+            echo "##vso[task.setvariable variable=APP;isOutput=true]fa-${ENV}-${SLOT}-pcrrelay"
+            echo "##vso[task.setvariable variable=TOPIC_NAME;isOutput=true]eg-${ENV}-${SLOT}-hearingres"
+            echo "##vso[task.setvariable variable=STORAGE;isOutput=true]$STORAGE"
+
+      - task: AzureCLI@2
+        displayName: 'Create the dead-letter container if it does not already exist'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            # The dead-letter destination is this slot's own shared *-hearingres storage
+            # account, resolved per-slot the same way RG/APP/TOPIC_NAME are — not a static
+            # per-environment value, which would point every slot at the same wrong account.
+            # az eventgrid event-subscription create does not create the target container
+            # itself, so this must exist before the wiring step below.
+            if az storage container show --account-name "$(coords.STORAGE)" --name pcr-relay-deadletter --auth-mode login &>/dev/null; then
+              echo "Container pcr-relay-deadletter already exists on $(coords.STORAGE) — skipping."
+            else
+              az storage container create --account-name "$(coords.STORAGE)" --name pcr-relay-deadletter --auth-mode login
+            fi
+
+      - task: AzureCLI@2
+        displayName: 'Wire the Event Grid subscription — LIVE EVENTS START FLOWING (DEPLOYMENT.md §6)'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG="$(coords.RG)"; APP="$(coords.APP)"; TOPIC_NAME="$(coords.TOPIC_NAME)"
+            TOPIC=$(az eventgrid topic show -n "$TOPIC_NAME" -g "$RG" --query id -o tsv)
+
+            if az eventgrid event-subscription show --name egs-pcr-relay --source-resource-id "$TOPIC" &>/dev/null; then
+              echo "Subscription egs-pcr-relay already exists — skipping."
+              exit 0
+            fi
+
+            FN="$(az functionapp show -g "$RG" -n "$APP" --query id -o tsv)/functions/PrisonCourtRegisterHearingResulted"
+            DEADLETTER_STORAGE_ID=$(az storage account show --name "$(coords.STORAGE)" -g "$RG" --query id -o tsv)
+
+            # --included-event-types Hearing_Resulted is required for correctness: the topic
+            # also carries Hearing_Resulted_Complex, which PCR rejects with a non-retryable
+            # 400. Without --deadletter-endpoint, a failing event is silently discarded
+            # after 24h (DEPLOYMENT.md §6).
+            az eventgrid event-subscription create \
+              --name egs-pcr-relay \
+              --source-resource-id "$TOPIC" \
+              --endpoint-type azurefunction --endpoint "$FN" \
+              --included-event-types Hearing_Resulted \
+              --max-delivery-attempts 30 --event-ttl 1440 \
+              --deadletter-endpoint "$DEADLETTER_STORAGE_ID/blobServices/default/containers/pcr-relay-deadletter"

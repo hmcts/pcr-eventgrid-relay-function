@@ -1,7 +1,5 @@
 variables:
 # No relay deployed to any live environment yet (DEPLOYMENT.md §9). Different Azure
-# subscription/tenant entirely from dev/sit/ste — placeholders until that access exists.
+# subscription/tenant entirely from dev/sit/ste — placeholder until that access exists.
 - name: pcrServiceIngestionEndpoint
   value: "https://REPLACE_WITH_REAL_PRD_INGRESS_HOST/pcr/internal/hearing-results"
-- name: deadletterStorageResourceId
-  value: "REPLACE_WITH_REAL_PRD_STORAGE_ACCOUNT_RESOURCE_ID"
