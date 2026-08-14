@@ -59,11 +59,9 @@ parameters:
   displayName: "Run provisioning"
   type: boolean
   default: false
-# DEPLOYMENT.md §6 calls this "the point of no return" — live events start flowing
-# immediately. Deliberately a separate parameter from runProvision: activating the
-# subscription is a distinct decision from creating infrastructure, made once code is
-# confirmed deployed (this stage depends on Deploy having actually succeeded, not just
-# been skipped).
+# DEPLOYMENT.md §6: "the point of no return" — live events start flowing immediately.
+# Separate from runProvision since going live is a distinct decision from creating
+# infrastructure.
 - name: runActivateSubscription
   displayName: "Activate the Event Grid subscription (live events start flowing)"
   type: boolean
@@ -72,10 +70,8 @@ parameters:
 variables:
 # azureServiceConnection is platform-scoped (nonlive vs live).
 - template: azure-pipeline-variables/${{ parameters.platform }}.yml
-# pcrServiceIngestionEndpoint is per-environment, not per-platform or per-slot — each of
-# dev/sit/ste has a genuinely different ingress host, but all slots within one environment
-# share it (unlike the dead-letter storage account, which ActivateSubscription resolves
-# per-slot itself rather than reading a static value here).
+# pcrServiceIngestionEndpoint is per-environment — each of dev/sit/ste has a different
+# ingress host, shared across all slots in that environment.
 - template: azure-pipeline-variables/env-${{ parameters.environment }}.yml
 # githubToken: fine-grained PAT (Contents:Read-only on this repo only) used below to
 # download the GitHub Release asset (design.md §2.1).
@@ -92,14 +88,8 @@ resources:
 stages:
   # Provision — one-time, manual-gated. DEPLOYMENT.md §4: create app + VNet integration +
   # static settings. Idempotency checks are this pipeline's own addition; the doc's commands
-  # assume a fresh resource group.
-  #
-  # Deliberately stops short of the Event Grid subscription (DEPLOYMENT.md §6) — that's the
-  # ActivateSubscription stage, gated by its own parameter. Keeping infra creation and
-  # activation in one stage meant a brand-new slot's first run legitimately failed at "verify
-  # function registered" (no code yet, since Deploy hadn't run), which reads as a broken
-  # pipeline in build history even though it isn't. Splitting them means a first-time
-  # runProvision=true run just creates infra and succeeds — Deploy follows immediately after.
+  # assume a fresh resource group. Deliberately stops short of the Event Grid subscription
+  # (DEPLOYMENT.md §6) — see the ActivateSubscription stage for that.
   - stage: Provision
     condition: and(eq(variables['Build.Reason'], 'Manual'), eq('${{ parameters.runProvision }}', 'true'))
     pool:
@@ -121,11 +111,9 @@ stages:
             SLOT="${{ parameters.slot }}"
             RG="RG-$(echo $ENV | tr a-z A-Z)-$(echo $SLOT | tr a-z A-Z)-HEARINGRES"
             APP="fa-${ENV}-${SLOT}-pcrrelay"
-            # Confirmed with the platform team: PCR relay gets its own dedicated plan (1:1), not
-            # the shared *-hearingres one other siblings sometimes use — confirmed inconsistent
-            # across slots anyway (some have a shared plan, some don't). App Insights is
-            # different: it IS meant to be shared (like the topic below) — most real slots
-            # checked have the siblings sharing one ai-*-hearingres instance.
+            # Plan is dedicated to PCR relay (1:1); App Insights is shared with siblings, like
+            # the topic below — sharing conventions for these two resources are independent
+            # and not implied by each other across the estate.
             PLAN="as-${ENV}-${SLOT}-pcrrelay"
             STORAGE="sa${ENV}${SLOT}hearingres"   # DEPLOYMENT.md §4: "verify — naming is not perfectly regular"
             AI="ai-${ENV}-${SLOT}-hearingres"
@@ -259,13 +247,9 @@ stages:
               FORWARD_RETRY_DELAY_IN_SECONDS=2
 
   # Deploy — routine, runs on every release. Never touches the Event Grid subscription or
-  # creates the app; both are Provision-only. Implements design.md §2.1/§3.1.
-  #
-  # Explicitly depends on Provision rather than running concurrently with it: on a genuinely
-  # new slot, Provision's plan/app-creation chain takes far longer than Deploy's download step,
-  # so an unordered run would have Deploy try to zipDeploy before the app exists. Proceeds if
-  # Provision succeeded OR was skipped (the normal runProvision=false case), but not if it
-  # failed — a broken provision shouldn't be followed by a deploy attempt.
+  # creates the app; both are Provision-only. Implements design.md §2.1/§3.1. Depends on
+  # Provision (succeeded or skipped, not failed) rather than running concurrently, so it
+  # never tries to deploy before the app exists.
   - stage: Deploy
     dependsOn: Provision
     condition: in(dependencies.Provision.result, 'Succeeded', 'Skipped')
@@ -361,9 +345,8 @@ stages:
             set -euo pipefail
             RG="$(coords.RG)"; APP="$(coords.APP)"
             # `az functionapp function list` goes through ARM's control-plane proxy, which lags
-            # well behind actual host readiness (observed 8-20+ min after the Kudu deployment
-            # record already showed the zip active within seconds). Querying the host's own
-            # /admin/functions directly reflects reality immediately.
+            # well behind actual host readiness. Querying the host's own /admin/functions
+            # directly reflects reality immediately.
             MASTER_KEY=$(az functionapp keys list -g "$RG" -n "$APP" --query masterKey -o tsv)
             for i in $(seq 1 20); do
               if curl -sf "https://${APP}.azurewebsites.net/admin/functions?code=${MASTER_KEY}" \
@@ -378,11 +361,10 @@ stages:
             exit 1
 
   # Activate the Event Grid subscription (DEPLOYMENT.md §6) — "the point of no return," live
-  # events start flowing immediately. Deliberately its own stage/parameter rather than part of
-  # Provision: depends on Deploy having actually Succeeded (not just Skipped), so it's
-  # structurally impossible to activate a subscription for an app with no confirmed-registered
-  # code. Resolves its own coordinates rather than reading Provision's outputs, same reason
-  # Deploy does — Provision may not have run in this trigger at all.
+  # events start flowing immediately. Depends on Deploy having actually Succeeded (not just
+  # Skipped), so a subscription can't be activated for an app with no confirmed-registered
+  # code. Resolves its own coordinates rather than reading Provision's outputs, since
+  # Provision may not have run in this trigger at all.
   - stage: ActivateSubscription
     dependsOn: Deploy
     condition: and(eq('${{ parameters.runActivateSubscription }}', 'true'), eq(dependencies.Deploy.result, 'Succeeded'))
@@ -418,15 +400,10 @@ stages:
           inlineScript: |
             set -euo pipefail
             # The dead-letter destination is this slot's own shared *-hearingres storage
-            # account — same one Deploy's Function App already sits on — resolved the same
-            # way RG/APP/TOPIC_NAME are, not a static per-environment value. A static value
-            # here previously pointed every slot in an environment at the SAME (wrong) real
-            # storage account, discovered when a CCP0122 test wired against CCP0121's real
-            # dead-letter container instead of its own.
-            #
+            # account, resolved per-slot the same way RG/APP/TOPIC_NAME are — not a static
+            # per-environment value, which would point every slot at the same wrong account.
             # az eventgrid event-subscription create does not create the target container
-            # itself, so a slot whose dead-letter storage account has never hosted this
-            # container before would otherwise fail at the wiring step below.
+            # itself, so this must exist before the wiring step below.
             if az storage container show --account-name "$(coords.STORAGE)" --name pcr-relay-deadletter --auth-mode login &>/dev/null; then
               echo "Container pcr-relay-deadletter already exists on $(coords.STORAGE) — skipping."
             else
