@@ -59,9 +59,6 @@ parameters:
   displayName: "Run provisioning"
   type: boolean
   default: false
-# DEPLOYMENT.md §6: "the point of no return" — live events start flowing immediately.
-# Separate from runProvision since going live is a distinct decision from creating
-# infrastructure.
 - name: runActivateSubscription
   displayName: "Activate the Event Grid subscription (live events start flowing)"
   type: boolean
