@@ -1,8 +1,8 @@
 plugins {
   id 'java'
   id 'jacoco'
-  id 'io.github.ben-manes.versions' version '0.60.0'
-  id 'org.cyclonedx.bom' version '3.4.0'
+  id 'io.github.ben-manes.versions' version '0.61.0'
+  id 'org.cyclonedx.bom' version '3.4.1'
   id 'com.microsoft.azure.azurefunctions' version '1.17.0'
   id 'com.avast.gradle.docker-compose' version '0.17.21'
 }
@@ -28,7 +28,7 @@ dependencies {
   implementation 'com.microsoft.azure.functions:azure-functions-java-library:3.3.0'
 
   // JSON
-  implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.1'
+  implementation 'com.fasterxml.jackson.core:jackson-databind:2.22.2'
 
   // Logging
   implementation 'org.slf4j:slf4j-api:2.0.18'
