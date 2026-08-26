@@ -63,6 +63,13 @@ parameters:
   displayName: "Activate the Event Grid subscription (live events start flowing)"
   type: boolean
   default: false
+# THROWAWAY: gates a one-off Cleanup stage added only on this disposable branch, to delete a
+# resource via pipeline 793's own already-authorized service connection — personal accounts
+# have no delete rights on this subscription. Discard this branch once cleanup is done.
+- name: confirmDelete
+  displayName: "I understand this permanently deletes the listed test resources — confirm"
+  type: boolean
+  default: false
 
 variables:
 # azureServiceConnection is platform-scoped (nonlive vs live).
@@ -437,3 +444,26 @@ stages:
               --included-event-types Hearing_Resulted \
               --max-delivery-attempts 30 --event-ttl 1440 \
               --deadletter-endpoint "$DEADLETTER_STORAGE_ID/blobServices/default/containers/pcr-relay-deadletter"
+
+  # THROWAWAY stage, this branch only — discard the branch once cleanup is done.
+  - stage: Cleanup
+    dependsOn: []
+    condition: and(eq(variables['Build.Reason'], 'Manual'), eq('${{ parameters.confirmDelete }}', 'true'))
+    pool:
+      name: ${{ parameters.agentPool }}
+    jobs:
+    - job: cleanup
+      timeoutInMinutes: 10
+      steps:
+      - task: AzureCLI@2
+        displayName: 'Delete testsbpcr event subscription on eg-ste-ccp0122-hearingres'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            RG=RG-STE-CCP0122-HEARINGRES
+            SUB_ID=$(az account show --query id -o tsv)
+            TOPIC_ID="/subscriptions/$SUB_ID/resourceGroups/$RG/providers/Microsoft.EventGrid/topics/eg-ste-ccp0122-hearingres"
+            az eventgrid event-subscription delete --name testsbpcr --source-resource-id "$TOPIC_ID"
