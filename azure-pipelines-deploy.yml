@@ -467,3 +467,13 @@ stages:
             SUB_ID=$(az account show --query id -o tsv)
             TOPIC_ID="/subscriptions/$SUB_ID/resourceGroups/$RG/providers/Microsoft.EventGrid/topics/eg-ste-ccp0122-hearingres"
             az eventgrid event-subscription delete --name testsbpcr --source-resource-id "$TOPIC_ID"
+
+      - task: AzureCLI@2
+        displayName: 'Delete testhearingpcr Service Bus queue on sbdevamp01'
+        inputs:
+          azureSubscription: ${{ variables.azureServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az servicebus queue delete -g RG-DEV-SBNS-01 --namespace-name sbdevamp01 --name testhearingpcr
